@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.evandro777.FastApiClient</id>
+  <name>FastApiClient</name>
+  <summary>Light and fast REST API client</summary>
+  <metadata_license>FSFAP</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.github.evandro777">
+    <name translatable="no">evandro777</name>
+  </developer>
+  <url type="homepage">https://github.com/evandro777/FastApiClient</url>
+  <description>
+    <p>FastApiClient is a light and fast REST API client for Linux. It starts quickly, uses little memory and keeps your requests in plain files.</p>
+    <ul>
+      <li>Projects with nested folders; headers and auth are inherited down to each request</li>
+      <li>Environments and variables, with autocomplete after {{</li>
+      <li>Chain requests: take a token from another request's response and reuse it</li>
+      <li>Response panel with JSON and XML beautify, search, headers and the request actually sent</li>
+      <li>Import Insomnia v5 exports; export projects as JSON</li>
+    </ul>
+  </description>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/evandro777/FastApiClient/master/docs/screenshots/main.png</image>
+    </screenshot>
+  </screenshots>
+  <launchable type="desktop-id">io.github.evandro777.FastApiClient.desktop</launchable>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.1" date="2026-11-15">
+      <description>
+        <p>First release: projects, folders, environments, variables, response chaining and Insomnia v5 import.</p>
+      </description>
+    </release>
+  </releases>
+</component>

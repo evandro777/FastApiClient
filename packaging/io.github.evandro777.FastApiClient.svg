@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- Fast family icon: flat tile with a stepped top-right corner, white symbol leaning 8 degrees. Solid colours only (ImageMagick makes the PNG). -->
+  <path d="M26 0H64V14H92V28H128V102A26 26 0 0 1 102 128H26A26 26 0 0 1 0 102V26A26 26 0 0 1 26 0Z" fill="#7a4fd6"/>
+  <g transform="translate(62 68) skewX(-8) translate(-62 -68)" fill="none" stroke="#ffffff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M52 38Q42 38 42 48V58Q42 68 34 68Q42 68 42 78V88Q42 98 52 98"/>
+    <path d="M72 38Q82 38 82 48V58Q82 68 90 68Q82 68 82 78V88Q82 98 72 98"/>
+    <circle cx="62" cy="68" r="6" fill="#ffffff" stroke="none"/>
+  </g>
+</svg>

@@ -1,0 +1,122 @@
+import { Palette, ScrollView } from "std-widgets.slint";
+import { VarAssist, VarList } from "var-popup.slint";
+
+// The text edit that Rust helps: Slint strings have no substring, so the indentation is inserted by Rust.
+export global CodeEditing {
+    // The text with the selection (byte offsets, start then end) replaced by one level of indentation.
+    pure callback indent(string, int, int) -> string;
+    // How many bytes `indent` inserts when nothing is selected, to place the cursor after it.
+    pure callback indent-width() -> int;
+}
+
+// A multi-line editor for JSON, XML and environment text. It looks like the standard `TextEdit`, but Tab indents
+// instead of moving the focus to the next field (Shift+Tab still leaves the field).
+export component CodeEdit inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    callback edited(string);
+    // Variables offered after `{{` or Ctrl+Space; empty for the environment editor, which defines them.
+    in property <[string]> var-names;
+    in property <bool> var-assist: false;
+    // The text and cursor before the last pick, for Ctrl+Z (setting the text from code bypasses the widget's undo).
+    property <string> undo-text;
+    property <int> undo-caret;
+    property <bool> can-undo;
+    property <length> cx;
+    property <length> cy;
+    background: Palette.control-background;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: input.has-focus ? Palette.accent-background : Palette.border;
+    horizontal-stretch: 1;
+    vertical-stretch: 1;
+    forward-focus: input;
+    accessible-role: text-input;
+    accessible-value <=> input.text;
+
+    view := ScrollView {
+        x: 8px;
+        y: 8px;
+        width: parent.width - 16px;
+        height: parent.height - 16px;
+        content-width: self.visible-width;
+        content-height: max(self.visible-height, input.preferred-height);
+
+        input := TextInput {
+            single-line: false;
+            wrap: word-wrap;
+            color: Palette.foreground;
+            selection-background-color: Palette.selection-background;
+            selection-foreground-color: Palette.selection-foreground;
+            page-height: view.visible-height;
+            // The ScrollView of the widget takes care of this.
+            accessible-role: none;
+
+            changed has-focus => { if !self.has-focus { root.can-undo = false; list.dismiss(); } }
+
+            edited => {
+                root.can-undo = false;
+                root.edited(self.text);
+                if root.var-assist { list.update(self.text, self.cursor-position-byte-offset, false); }
+            }
+
+            key-pressed(event) => {
+                if root.var-assist && list.handle(event) { return accept; }
+                if root.can-undo && event.modifiers.control && !event.modifiers.shift && (event.text == "z" || event.text == "\u{1a}") {
+                    root.can-undo = false;
+                    self.text = root.undo-text;
+                    self.set-selection-offsets(root.undo-caret, root.undo-caret);
+                    root.edited(self.text);
+                    return accept;
+                }
+                if root.var-assist && event.modifiers.control && event.text == " " {
+                    list.update(self.text, self.cursor-position-byte-offset, true);
+                    return accept;
+                }
+                if event.text == Key.Tab && !event.modifiers.shift {
+                    // Replaces the selection, like any other typed text.
+                    let start = min(self.cursor-position-byte-offset, self.anchor-position-byte-offset);
+                    let end = max(self.cursor-position-byte-offset, self.anchor-position-byte-offset);
+                    self.text = CodeEditing.indent(self.text, start, end);
+                    self.set-selection-offsets(start + CodeEditing.indent-width(), start + CodeEditing.indent-width());
+                    root.edited(self.text);
+                    return accept;
+                }
+                return reject;
+            }
+
+            // Keeps the cursor in view, as the standard TextEdit does.
+            cursor-position-changed(cpos) => {
+                root.cx = cpos.x;
+                root.cy = cpos.y;
+                if (cpos.x + view.content-x < 0px) {
+                    view.content-x = min(0px, max(view.visible-width - self.width, -cpos.x));
+                } else if (cpos.x + view.content-x > view.visible-width) {
+                    view.content-x = min(0px, max(view.visible-width - self.width, view.visible-width - cpos.x));
+                }
+                if (cpos.y + view.content-y < 0px) {
+                    view.content-y = min(0px, view.visible-height - cpos.y - 20px, max(view.visible-height - self.height, -cpos.y));
+                } else if (cpos.y + view.content-y > view.visible-height - 20px) {
+                    view.content-y = min(0px, max(view.visible-height - self.height, view.visible-height - cpos.y - 20px));
+                }
+            }
+        }
+    }
+
+    // Under the line the cursor is on, kept inside the editor.
+    list := VarList {
+        x: max(0px, min(root.cx + view.content-x + 8px, root.width - self.width));
+        y: min(root.cy + view.content-y + 8px + 22px, root.height - self.height);
+        names: root.var-names;
+        opened => { input.focus(); }
+        picked(name) => {
+            let c = input.cursor-position-byte-offset;
+            let after = VarAssist.insert-caret(input.text, c, name);
+            root.undo-text = input.text;
+            input.text = VarAssist.insert(input.text, c, name);
+            root.undo-caret = VarAssist.caret(input.text, root.undo-text);
+            root.can-undo = true;
+            input.set-selection-offsets(after, after);
+            root.edited(input.text);
+        }
+    }
+}

@@ -1,0 +1,238 @@
+import { Button, ComboBox, Palette, ScrollView } from "std-widgets.slint";
+import { Family } from "family.slint";
+import { GhostButton, MenuButton } from "controls.slint";
+
+// One line of the project tree. `project`, `folder` and `request` are indexes (-1 = none) that identify the node.
+export struct TreeRow {
+    text: string,
+    depth: int,
+    kind: int, // 1 folder, 2 request (the project has no row)
+    method: string,
+    selected: bool,
+    project: int,
+    folder: int,
+    request: int,
+}
+
+component MethodBadge inherits Text {
+    in property <string> method;
+    text: root.method;
+    // Wide enough for the longest method, OPTIONS, in bold.
+    width: 62px;
+    font-size: Family.caption;
+    font-weight: Family.section-weight;
+    overflow: elide;
+    vertical-alignment: center;
+    color: Family.method-color(root.method);
+}
+
+component MenuEntry inherits Rectangle {
+    in property <string> label;
+    callback activated();
+    height: 30px;
+    border-radius: 3px;
+    background: ta.has-hover ? Family.selected : transparent;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        Text {
+            text: root.label;
+            vertical-alignment: center;
+            color: Palette.foreground;
+        }
+    }
+    ta := TouchArea { clicked => { root.activated(); } }
+}
+
+export component Sidebar inherits Rectangle {
+    in property <[TreeRow]> rows;
+    in property <bool> has-selection;
+    // The tree below shows only the project picked here.
+    in property <[string]> project-options;
+    in-out property <int> project-index;
+    callback project-activated(int);
+    // First option is "no environment"; the index is the active one.
+    in property <[string]> env-options;
+    in-out property <int> env-active-index;
+    callback env-activated(int);
+    callback manage-envs();
+    callback send();
+    callback select(int, int, int);
+    callback step(int); // Up (-1) or Down (1): select the neighbouring row
+    in property <int> selected-index: -1;
+    callback menu(); // the burger: opens Preferences
+    callback manage(); // opens the Manage menu (projects, import, export, global config)
+    callback new-folder();
+    callback new-request();
+    callback rename();
+    callback delete();
+    background: Palette.alternate-background;
+
+    // Gives the keyboard back to the tree (F2) after a dialog closed.
+    public function focus-tree() { keys.focus(); }
+
+    // Keeps the selected row in view when the arrow keys move it. A row is 28px plus 2px of spacing.
+    changed selected-index => {
+        if root.selected-index >= 0 {
+            let top = root.selected-index * 30px;
+            let bottom = top + 28px;
+            if top + tree-scroll.content-y < 0px {
+                tree-scroll.content-y = -top;
+            } else if bottom + tree-scroll.content-y > tree-scroll.visible-height {
+                tree-scroll.content-y = tree-scroll.visible-height - bottom;
+            }
+        }
+    }
+
+    keys := FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if event.text == Key.UpArrow {
+                root.step(-1);
+                return accept;
+            }
+            if event.text == Key.DownArrow {
+                root.step(1);
+                return accept;
+            }
+            // Asks for confirmation like the context menu does.
+            // Only on a highlighted row: with the project itself open (Global config) there is nothing to delete here.
+            if event.text == Key.Delete && root.selected-index >= 0 {
+                root.delete();
+                return accept;
+            }
+            if event.text == Key.F2 && root.selected-index >= 0 {
+                root.rename();
+                return accept;
+            }
+            // The same shortcut as in the editor, for when the tree has the keyboard.
+            if event.text == Key.Return && event.modifiers.control {
+                root.send();
+                return accept;
+            }
+            return reject;
+        }
+
+        VerticalLayout {
+            padding: 8px;
+            spacing: 8px;
+            // The app header, as in the other sidebar apps: icon, name and the burger that opens Preferences.
+            HorizontalLayout {
+                spacing: 8px;
+                padding-left: 4px;
+                Image {
+                    source: @image-url("../../../packaging/io.github.evandro777.FastApiClient.svg");
+                    width: 24px;
+                    height: 24px;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text { text: "FastApiClient"; font-weight: Family.section-weight; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; }
+                MenuButton { y: (parent.height - self.height) / 2; label: @tr("Preferences"); clicked => { root.menu(); } }
+            }
+            HorizontalLayout {
+                spacing: 4px;
+                ComboBox {
+                    horizontal-stretch: 1;
+                    model: root.project-options;
+                    enabled: root.project-options.length > 0;
+                    current-index <=> root.project-index;
+                    selected(v) => { root.project-activated(self.current-index); }
+                }
+                Button { text: @tr("Manage"); clicked => { root.manage(); } }
+            }
+            HorizontalLayout {
+                spacing: 4px;
+                ComboBox {
+                    horizontal-stretch: 1;
+                    model: root.env-options;
+                    enabled: root.has-selection;
+                    current-index <=> root.env-active-index;
+                    selected(v) => { root.env-activated(self.current-index); }
+                }
+                // Not "Manage": that name is the project menu one row above.
+                Button { text: @tr("Environments"); enabled: root.has-selection; clicked => { root.manage-envs(); } }
+            }
+            HorizontalLayout {
+                spacing: 4px;
+                alignment: start;
+                GhostButton { text: @tr("New folder"); plus: true; enabled: root.has-selection; clicked => { root.new-folder(); } }
+                GhostButton { text: @tr("New request"); plus: true; enabled: root.has-selection; clicked => { root.new-request(); } }
+            }
+            if root.rows.length == 0 && root.project-options.length == 0: Text {
+                text: @tr("No projects yet. Open Manage and choose New project.");
+                wrap: word-wrap;
+            }
+            if root.rows.length == 0 && root.project-options.length > 0: Text {
+                text: @tr("Empty project. Add a folder or a request.");
+                wrap: word-wrap;
+            }
+            tree-scroll := ScrollView {
+                // `alignment: start` or a short list would spread its rows over the whole height.
+                VerticalLayout {
+                    alignment: start;
+                    spacing: 2px;
+                    for row in root.rows: Rectangle {
+                        height: 28px;
+                        border-radius: 4px;
+                        background: row.selected ? Family.selected : touch.has-hover ? Palette.foreground.with-alpha(0.06) : transparent;
+                        if row.selected: Rectangle {
+                            x: 0px;
+                            width: Family.selected-bar;
+                            height: parent.height * 0.6;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: 1.5px;
+                            background: Palette.accent-background;
+                        }
+                        // Both buttons select the row; the right one also opens the menu, which then acts on it.
+                        touch := TouchArea {
+                            pointer-event(e) => {
+                                if e.kind == PointerEventKind.down {
+                                    root.select(row.project, row.folder, row.request);
+                                    keys.focus();
+                                    if e.button == PointerEventButton.right {
+                                        row-menu.show();
+                                    }
+                                }
+                            }
+                        }
+                        row-menu := PopupWindow {
+                            x: touch.mouse-x;
+                            y: touch.mouse-y;
+                            width: 150px;
+                            height: 66px;
+                            Rectangle {
+                                background: Palette.background;
+                                border-color: Palette.border;
+                                border-width: 1px;
+                                border-radius: 4px;
+                                VerticalLayout {
+                                    padding: 2px;
+                                    spacing: 2px;
+                                    MenuEntry { label: @tr("Rename (F2)"); activated => { root.rename(); } }
+                                    MenuEntry { label: @tr("Delete"); activated => { root.delete(); } }
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            // The top level (depth 0) is not indented, to save width.
+                            padding-left: 6px + row.depth * 14px;
+                            padding-right: 6px;
+                            spacing: 6px;
+                            if row.kind == 2: MethodBadge { method: row.method; }
+                            Text {
+                                text: row.text;
+                                overflow: elide;
+                                min-width: 0px;
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                                font-weight: row.kind == 1 ? 600 : 400;
+                                color: Palette.foreground;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,117 @@
+import { CheckBox, LineEdit, Palette, ScrollView } from "std-widgets.slint";
+import { CloseButton } from "controls.slint";
+import { Family } from "family.slint";
+import { VarLineEdit } from "var-popup.slint";
+
+export struct KeyValueRow {
+    enabled: bool,
+    key: string,
+    value: string,
+    description: string,
+}
+
+component KeyValueLine inherits HorizontalLayout {
+    in property <int> index;
+    in property <KeyValueRow> data;
+    callback edited(int, KeyValueRow);
+    callback removed(int);
+    in property <[string]> var-names;
+    spacing: 6px;
+
+    function emit() {
+        root.edited(root.index, { enabled: c.checked, key: k.text, value: v.text, description: d.text });
+    }
+
+    // Typing breaks a widget's one-way binding, so a row that shifts up after a removal must be pushed in by hand.
+    // The guards keep the cursor where it is when the model only echoes back what was just typed.
+    changed data => {
+        if c.checked != root.data.enabled { c.checked = root.data.enabled; }
+        if k.text != root.data.key { k.text = root.data.key; }
+        if v.text != root.data.value { v.text = root.data.value; }
+        if d.text != root.data.description { d.text = root.data.description; }
+    }
+
+    c := CheckBox { checked: root.data.enabled; toggled => { root.emit(); } }
+    // VarLineEdit wraps LineEdit, not a bare TextInput: it follows the caret in a long value and has the Cut/Copy/Paste menu.
+    // The description is never sent, so it gets no variable list.
+    k := VarLineEdit {
+        var-names: root.var-names;
+        horizontal-stretch: 2;
+        preferred-width: 0px;
+        text: root.data.key;
+        placeholder-text: @tr("Key");
+        edited => { root.emit(); }
+    }
+    v := VarLineEdit {
+        var-names: root.var-names;
+        horizontal-stretch: 3;
+        preferred-width: 0px;
+        text: root.data.value;
+        placeholder-text: @tr("Value");
+        edited => { root.emit(); }
+    }
+    d := LineEdit {
+        horizontal-stretch: 3;
+        preferred-width: 0px;
+        text: root.data.description;
+        placeholder-text: @tr("Description");
+        edited => { root.emit(); }
+    }
+    // The blank row at the end is where the next entry goes; it is never removed, so it shows no button.
+    Rectangle {
+        width: 28px;
+        CloseButton {
+            visible: root.data.key != "" || root.data.value != "" || root.data.description != "";
+            y: (parent.height - self.height) / 2;
+            label: @tr("Remove row");
+            clicked => { root.removed(root.index); }
+        }
+    }
+}
+
+// One caption. The invisible, zero-height LineEdit gives the cell the same minimum width as the real one below, so
+// the columns of the captions and of `KeyValueLine` get the same widths from the same stretch.
+component HeadCell inherits VerticalLayout {
+    in property <string> text;
+    Rectangle {
+        height: 24px;
+        Text { x: 12px; width: parent.width - 12px; text: root.text; overflow: elide; color: Family.muted; font-size: Family.caption; vertical-alignment: center; }
+    }
+    LineEdit { visible: false; enabled: false; height: 0px; }
+}
+
+// The captions share the columns of `KeyValueLine`: the same spacing, an invisible CheckBox for the first column, the
+// same stretch and `preferred-width: 0px`.
+component KeyValueHead inherits Rectangle {
+    height: 24px;
+    HorizontalLayout {
+        spacing: 6px;
+        CheckBox { visible: false; enabled: false; }
+        HeadCell { horizontal-stretch: 2; preferred-width: 0px; text: @tr("KeyValueLine" => "Key"); }
+        HeadCell { horizontal-stretch: 3; preferred-width: 0px; text: @tr("KeyValueLine" => "Value"); }
+        HeadCell { horizontal-stretch: 3; preferred-width: 0px; text: @tr("KeyValueLine" => "Description"); }
+        Rectangle { width: 28px; }
+    }
+    Rectangle { y: parent.height - 1px; height: 1px; background: Palette.border; }
+}
+
+// The owner keeps a blank row at the end, so there is always somewhere to type the next entry.
+export component KeyValueTable inherits ScrollView {
+    in property <[KeyValueRow]> rows;
+    in property <[string]> var-names;
+    callback edited(int, KeyValueRow);
+    callback removed(int);
+
+    VerticalLayout {
+        alignment: start;
+        spacing: 4px;
+        KeyValueHead { }
+        for row[i] in root.rows: KeyValueLine {
+            index: i;
+            data: row;
+            var-names: root.var-names;
+            edited(n, r) => { root.edited(n, r); }
+            removed(n) => { root.removed(n); }
+        }
+    }
+}

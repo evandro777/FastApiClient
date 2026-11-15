@@ -1,0 +1,109 @@
+import { Button, ComboBox, Palette, Switch, VerticalBox } from "std-widgets.slint";
+import { Family } from "family.slint";
+import { PrefRow } from "about.slint";
+
+// An in-window dialog (like About, not a second window): a dimmed overlay with a card that holds a title, the
+// buttons given as children, and Close. Escape or a click outside closes it. With `has-about` the footer also has an
+// About button on the left, like every Fast app's Preferences.
+component MenuCard inherits Rectangle {
+    in property <string> title;
+    in property <length> card-width: 280px;
+    in property <bool> has-about: false;
+    callback dismiss();
+    callback about();
+    background: Family.scrim;
+    init => { keys.focus(); }
+
+    // Swallows clicks so nothing behind the overlay is reachable; a click outside the card closes it.
+    TouchArea { clicked => { root.dismiss(); } }
+    keys := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.dismiss();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    Rectangle {
+        width: min(root.card-width, parent.width - 32px);
+        height: box.preferred-height;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Palette.background;
+        border-radius: Family.radius;
+        border-width: 1px;
+        border-color: Palette.border;
+        TouchArea { }
+        box := VerticalBox {
+            alignment: start;
+            padding: 16px;
+            spacing: Family.gap-l;
+            Text { text: root.title; font-size: Family.page-title; font-weight: Family.page-weight; }
+            @children
+            HorizontalLayout {
+                spacing: Family.gap-m;
+                if root.has-about: Button { text: @tr("About"); clicked => { root.about(); } }
+                Rectangle { horizontal-stretch: 1; }
+                Button { text: @tr("Close"); primary: true; clicked => { root.dismiss(); } }
+            }
+        }
+    }
+}
+
+// Preferences: Appearance first (the family rule), then the app's own options. This is where future ones go.
+export component MainMenu inherits MenuCard {
+    in-out property <bool> auto-beautify;
+    // 0 follows the system, 1 light, 2 dark (settings.theme).
+    in-out property <int> color-scheme-index;
+    // 0 follows the system, 1 English, 2 Português (settings.language).
+    in-out property <int> language-index;
+    callback language-changed(int);
+    callback toggled();
+    title: @tr("Preferences");
+    card-width: Family.dialog-width;
+    has-about: true;
+    PrefRow {
+        label: @tr("Appearance");
+        ComboBox {
+            width: Family.control-width;
+            model: [@tr("System"), @tr("Light"), @tr("Dark")];
+            current-index <=> root.color-scheme-index;
+        }
+    }
+    PrefRow {
+        label: @tr("Language");
+        // Language names stay in their own language, so they are not translated.
+        ComboBox {
+            width: Family.control-width;
+            model: [@tr("System"), "English", "Português (Brasil)"];
+            current-index <=> root.language-index;
+            selected(_) => { root.language-changed(self.current-index); }
+        }
+    }
+    PrefRow {
+        label: @tr("Beautify responses automatically");
+        Switch {
+            checked <=> root.auto-beautify;
+            toggled => { root.toggled(); }
+        }
+    }
+}
+
+// Everything about projects: create, rename, delete, import, export, and the project's shared headers and auth.
+export component ManageMenu inherits MenuCard {
+    in property <bool> has-project;
+    callback new-project();
+    callback rename-project();
+    callback delete-project();
+    callback export();
+    callback import();
+    callback global-config();
+    title: @tr("Manage");
+    Button { text: @tr("New project"); clicked => { root.new-project(); } }
+    Button { text: @tr("Rename project"); enabled: root.has-project; clicked => { root.rename-project(); } }
+    Button { text: @tr("Delete project"); enabled: root.has-project; clicked => { root.delete-project(); } }
+    Button { text: @tr("Export"); enabled: root.has-project; clicked => { root.export(); } }
+    Button { text: @tr("Import"); clicked => { root.import(); } }
+    Button { text: @tr("Global config"); enabled: root.has-project; clicked => { root.global-config(); } }
+}

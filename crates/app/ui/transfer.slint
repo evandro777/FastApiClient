@@ -1,0 +1,132 @@
+import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView, VerticalBox } from "std-widgets.slint";
+import { Family } from "family.slint";
+
+// One project in the export checklist.
+export struct ExportRow {
+    name: string,
+    checked: bool,
+}
+
+// An in-window dialog (like About). Export: tick the projects and choose the folder the files go to. Import: choose
+// the format of a file and the file.
+export component Transfer inherits Rectangle {
+    in property <bool> exporting; // false: import
+    in-out property <int> format; // import only: 0 FastApiClient, 1 Insomnia V5.1
+    in-out property <string> path; // the folder (export) or the file (import)
+    in-out property <bool> include-values: false;
+    in property <[ExportRow]> export-rows;
+    in property <int> selected; // how many rows are ticked
+    in property <string> message; // already translated; "" for none
+    in property <bool> ok; // the message reports success
+    in property <bool> picking; // the file or folder chooser is open
+    callback toggled(int, bool);
+    callback browse();
+    callback run();
+    callback dismiss();
+    background: Family.scrim;
+
+    // Swallows clicks so nothing behind the overlay is reachable; a click outside the card closes it.
+    TouchArea { clicked => { root.dismiss(); } }
+    // `capture-key-pressed` so Escape works while the path field has the focus.
+    keys := FocusScope {
+        capture-key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.dismiss();
+                return accept;
+            }
+            return reject;
+        }
+        Rectangle {
+            width: min(parent.width - 32px, 560px);
+            height: box.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border;
+            TouchArea { }
+            box := VerticalBox {
+                alignment: start;
+                spacing: 8px;
+                Text {
+                    text: root.exporting ? @tr("Export") : @tr("Import");
+                    font-size: Family.page-title;
+                    font-weight: Family.page-weight;
+                }
+                Text {
+                    text: root.exporting
+                        ? @tr("Saves each ticked project, with its folders, requests and environments, to its own file in the folder.")
+                        : root.format == 1
+                        ? @tr("Adds the folders, requests and environments of an Insomnia v5 export (YAML) as a new project.")
+                        : @tr("Adds the project stored in a file as a new project.");
+                    wrap: word-wrap;
+                }
+                if !root.exporting: HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: @tr("Format"); vertical-alignment: center; }
+                    ComboBox {
+                        horizontal-stretch: 1;
+                        // Product names, not translated.
+                        model: ["FastApiClient", "Insomnia V5.1"];
+                        current-index <=> root.format;
+                    }
+                }
+                if root.exporting: VerticalLayout {
+                    spacing: 4px;
+                    Text { text: @tr("Projects to export"); font-weight: Family.section-weight; }
+                    ScrollView {
+                        height: min(root.export-rows.length * 32px, 180px);
+                        // `alignment: start` or a short list would spread its rows over the whole height.
+                        VerticalLayout {
+                            alignment: start;
+                            for row[i] in root.export-rows: CheckBox {
+                                text: row.name;
+                                checked: row.checked;
+                                toggled => { root.toggled(i, self.checked); }
+                            }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit {
+                        text <=> root.path;
+                        placeholder-text: root.exporting ? @tr("Folder to save the files in") : @tr("Path of the file");
+                        init => { self.focus(); self.select-all(); }
+                        accepted => { root.run(); }
+                    }
+                    Button {
+                        text: @tr("Browse…");
+                        enabled: !root.picking;
+                        clicked => { root.browse(); }
+                    }
+                }
+                if root.exporting: CheckBox {
+                    text: @tr("Include environment values and auth secrets");
+                    checked <=> root.include-values;
+                }
+                if root.exporting && !root.include-values: Text {
+                    text: @tr("Without them the file is safe to share: environment keys stay, their values are emptied, and so are tokens and passwords.");
+                    wrap: word-wrap;
+                }
+                if root.message != "": Text {
+                    text: root.message;
+                    wrap: word-wrap;
+                    color: root.ok ? Family.success : Family.danger;
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    Button { text: @tr("Close"); clicked => { root.dismiss(); } }
+                    Button {
+                        text: root.exporting ? @tr("Export") : @tr("Import");
+                        primary: true;
+                        enabled: !root.exporting || root.selected > 0;
+                        clicked => { root.run(); }
+                    }
+                }
+            }
+        }
+    }
+}

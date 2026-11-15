@@ -1,0 +1,592 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: pt_BR\n"
+
+msgctxt "Tr"
+msgid "{} ms"
+msgstr "{} ms"
+
+msgctxt "Tr"
+msgid "{} B"
+msgstr "{} B"
+
+msgctxt "Tr"
+msgid "{} KB"
+msgstr "{} KB"
+
+msgctxt "Tr"
+msgid "Undefined variables: {}"
+msgstr "Variáveis não definidas: {}"
+
+msgctxt "Tr"
+msgid "This request uploads the file {} to {}. Only send it if you trust that server."
+msgstr "Esta requisição envia o arquivo {} para {}. Envie apenas se você confiar nesse servidor."
+
+msgctxt "VarList"
+msgid "No variables in the active environment"
+msgstr "Nenhuma variável no ambiente ativo"
+
+msgctxt "Tr"
+msgid "Saved to {}"
+msgstr "Salvo em {}"
+
+msgctxt "Tr"
+msgid "Imported the project \"{}\"."
+msgstr "Projeto \"{}\" importado."
+
+msgctxt "Tr"
+msgid "Enter the path of a file."
+msgstr "Informe o caminho de um arquivo."
+
+msgctxt "Tr"
+msgid "Saved {} files to {}"
+msgstr "{} arquivos salvos em {}"
+
+msgctxt "Tr"
+msgid "A file named {} already exists in that folder. Nothing was saved."
+msgstr "Já existe um arquivo chamado {} nessa pasta. Nada foi salvo."
+
+msgctxt "Tr"
+msgid "Enter the path of a folder."
+msgstr "Informe o caminho de uma pasta."
+
+msgctxt "Tr"
+msgid "Cannot write the file: {}"
+msgstr "Não foi possível gravar o arquivo: {}"
+
+msgctxt "Tr"
+msgid "Cannot read the file: {}"
+msgstr "Não foi possível ler o arquivo: {}"
+
+msgctxt "Tr"
+msgid "This is not a FastApiClient project file."
+msgstr "Este não é um arquivo de projeto do FastApiClient."
+
+msgctxt "Tr"
+msgid "The file is not valid JSON: {}"
+msgstr "O arquivo não é um JSON válido: {}"
+
+msgctxt "Tr"
+msgid "Imported {} projects."
+msgstr "{} projetos importados."
+
+msgctxt "Tr"
+msgid "This is not an Insomnia v5 export (YAML)."
+msgstr "Este não é uma exportação v5 do Insomnia (YAML)."
+
+msgctxt "Tr"
+msgid "The file is not valid YAML: {}"
+msgstr "O arquivo não é um YAML válido: {}"
+
+msgctxt "Tr"
+msgid "This file was made by a newer version of FastApiClient."
+msgstr "Este arquivo foi criado por uma versão mais nova do FastApiClient."
+
+msgctxt "Tr"
+msgid "New environment"
+msgstr "Novo ambiente"
+
+msgctxt "Tr"
+msgid "No environment"
+msgstr "Sem ambiente"
+
+msgctxt "Tr"
+msgid "Delete the environment \"{}\"? This cannot be undone."
+msgstr "Excluir o ambiente \"{}\"? Isso não pode ser desfeito."
+
+msgctxt "Tr"
+msgid "Invalid JSON, not saved yet: {}"
+msgstr "JSON inválido, ainda não salvo: {}"
+
+msgctxt "Tr"
+msgid "The value must be a JSON object, like {{ \"host\": \"example.com\" }}. Not saved yet."
+msgstr "O valor deve ser um objeto JSON, como {{ \"host\": \"exemplo.com\" }}. Ainda não salvo."
+
+msgctxt "Tr"
+msgid "New project"
+msgstr "Novo projeto"
+
+msgctxt "Tr"
+msgid "New folder"
+msgstr "Nova pasta"
+
+msgctxt "Tr"
+msgid "New request"
+msgstr "Nova requisição"
+
+msgctxt "Tr"
+msgid "Delete the project \"{}\" and everything in it? This cannot be undone."
+msgstr "Excluir o projeto \"{}\" e tudo que há nele? Isso não pode ser desfeito."
+
+msgctxt "Tr"
+msgid "Delete the folder \"{}\" and its requests? This cannot be undone."
+msgstr "Excluir a pasta \"{}\" e suas requisições? Isso não pode ser desfeito."
+
+msgctxt "Tr"
+msgid "Delete the request \"{}\"? This cannot be undone."
+msgstr "Excluir a requisição \"{}\"? Isso não pode ser desfeito."
+
+msgctxt "Tr"
+msgid "The URL is not valid."
+msgstr "A URL não é válida."
+
+msgctxt "Tr"
+msgid "The HTTP method is not valid."
+msgstr "O método HTTP não é válido."
+
+msgctxt "Tr"
+msgid "The header \"{}\" is not valid."
+msgstr "O cabeçalho \"{}\" não é válido."
+
+msgctxt "Tr"
+msgid "Cannot read the body file: {}"
+msgstr "Não foi possível ler o arquivo do corpo: {}"
+
+msgctxt "Tr"
+msgid "OAuth 2.0 is not available yet."
+msgstr "OAuth 2.0 ainda não está disponível."
+
+msgctxt "Tr"
+msgid "The request failed: {}"
+msgstr "A requisição falhou: {}"
+
+msgctxt "Tr"
+msgid "The request \"{}\" that this one needs failed: {}"
+msgstr "A requisição \"{}\" de que esta depende falhou: {}"
+
+msgctxt "Tr"
+msgid "The request \"{}\" needs its own response."
+msgstr "A requisição \"{}\" precisa da própria resposta."
+
+msgctxt "Main"
+msgid "https://example.com/api"
+msgstr "https://exemplo.com/api"
+
+msgctxt "Main"
+msgid "Sending…"
+msgstr "Enviando…"
+
+msgctxt "Main"
+msgid "Send"
+msgstr "Enviar"
+
+msgctxt "Main"
+msgid "Send a file?"
+msgstr "Enviar um arquivo?"
+
+msgctxt "Main"
+msgid "Params"
+msgstr "Parâmetros"
+
+msgctxt "Main"
+msgid "Headers"
+msgstr "Cabeçalhos"
+
+msgctxt "Main"
+msgid "Body"
+msgstr "Corpo"
+
+msgctxt "Main"
+msgid "Auth"
+msgstr "Autenticação"
+
+msgctxt "Main"
+msgid "No body"
+msgstr "Sem corpo"
+
+msgctxt "Main"
+msgid "Form data"
+msgstr "Form data"
+
+msgctxt "Main"
+msgid "Form URL encoded"
+msgstr "Form URL encoded"
+
+msgctxt "Main"
+msgid "JSON"
+msgstr "JSON"
+
+msgctxt "Main"
+msgid "XML"
+msgstr "XML"
+
+msgctxt "Main"
+msgid "File"
+msgstr "Arquivo"
+
+msgctxt "Main"
+msgid "This request has no body."
+msgstr "Esta requisição não tem corpo."
+
+msgctxt "Main"
+msgid "Path of the file to send"
+msgstr "Caminho do arquivo a enviar"
+
+msgctxt "Main"
+msgid "Inherit from parent"
+msgstr "Herdar do pai"
+
+msgctxt "Main"
+msgid "None"
+msgstr "Nenhuma"
+
+msgctxt "Main"
+msgid "Basic"
+msgstr "Basic"
+
+msgctxt "Main"
+msgid "Bearer token"
+msgstr "Bearer token"
+
+msgctxt "Main"
+msgid "Uses the auth of the parent folder or project."
+msgstr "Usa a autenticação da pasta ou do projeto pai."
+
+msgctxt "Main"
+msgid "No authentication is sent."
+msgstr "Nenhuma autenticação é enviada."
+
+msgctxt "Main"
+msgid "Username"
+msgstr "Usuário"
+
+msgctxt "Main"
+msgid "Password"
+msgstr "Senha"
+
+msgctxt "Main"
+msgid "Token"
+msgstr "Token"
+
+msgctxt "Main"
+msgid "Sent in the Authorization header as a Bearer token."
+msgstr "Enviado no cabeçalho Authorization como token Bearer."
+
+msgctxt "Main"
+msgid "Waiting for the response…"
+msgstr "Aguardando a resposta…"
+
+msgctxt "Main"
+msgid "Send a request (Ctrl+Enter) to see the response here."
+msgstr "Envie uma requisição (Ctrl+Enter) para ver a resposta aqui."
+
+msgctxt "Main"
+msgid "Truncated at 1 MB"
+msgstr "Truncado em 1 MB"
+
+msgctxt "Main"
+msgid "Response body"
+msgstr "Corpo da resposta"
+
+msgctxt "Main"
+msgid "Beautify"
+msgstr "Formatar"
+
+msgctxt "Main"
+msgid "Request"
+msgstr "Requisição"
+
+msgctxt "Main"
+msgid "Find"
+msgstr "Localizar"
+
+msgctxt "Main"
+msgid "Beautify responses automatically"
+msgstr "Formatar respostas automaticamente"
+
+msgctxt "Main"
+msgid "Copy"
+msgstr "Copiar"
+
+msgctxt "Main"
+msgid "Open in editor"
+msgstr "Abrir no editor"
+
+msgctxt "Main"
+msgid "Find in the response"
+msgstr "Localizar na resposta"
+
+msgctxt "Main"
+msgid "Response headers"
+msgstr "Cabeçalhos da resposta"
+
+msgctxt "Main"
+msgid "OAuth 2.0"
+msgstr "OAuth 2.0"
+
+msgctxt "Main"
+msgid "OAuth 2.0 settings cannot be edited yet; what is stored is kept as it is."
+msgstr "As configurações de OAuth 2.0 ainda não podem ser editadas; o que está salvo é mantido como está."
+
+msgctxt "Main"
+msgid "Create a project: open Manage and choose New project, then add a request."
+msgstr "Crie um projeto: abra Gerenciar, escolha Novo projeto e depois adicione uma requisição."
+
+msgctxt "Main"
+msgid "Rename project"
+msgstr "Renomear projeto"
+
+msgctxt "Main"
+msgid "Headers and auth set here apply to every request in this project."
+msgstr "Cabeçalhos e autenticação definidos aqui valem para todas as requisições deste projeto."
+
+msgctxt "Main"
+msgid "Headers and auth set here apply to every request in this folder."
+msgstr "Cabeçalhos e autenticação definidos aqui valem para todas as requisições desta pasta."
+
+msgctxt "Main"
+msgid "Rename"
+msgstr "Renomear"
+
+msgctxt "Main"
+msgid "Delete"
+msgstr "Excluir"
+
+msgctxt "Main"
+msgid "New environment"
+msgstr "Novo ambiente"
+
+msgctxt "Main"
+msgid "New project"
+msgstr "Novo projeto"
+
+msgctxt "Main"
+msgid "Create"
+msgstr "Criar"
+
+msgctxt "EnvEditor"
+msgid "Environments"
+msgstr "Ambientes"
+
+msgctxt "EnvEditor"
+msgid "Each environment is a JSON object. Use its keys in URLs, headers, params and bodies, like"
+msgstr "Cada ambiente é um objeto JSON. Use suas chaves em URLs, cabeçalhos, parâmetros e corpos, como"
+
+msgctxt "EnvEditor"
+msgid "Add"
+msgstr "Adicionar"
+
+msgctxt "EnvEditor"
+msgid "Rename"
+msgstr "Renomear"
+
+msgctxt "EnvEditor"
+msgid "Delete"
+msgstr "Excluir"
+
+msgctxt "EnvEditor"
+msgid "No environments yet. Add one to define variables such as the host or a token."
+msgstr "Nenhum ambiente ainda. Adicione um para definir variáveis como o host ou um token."
+
+msgctxt "EnvEditor"
+msgid "Close"
+msgstr "Fechar"
+
+msgctxt "EnvEditor"
+msgid "Save"
+msgstr "Salvar"
+
+msgctxt "EnvEditor"
+msgid "Unsaved changes"
+msgstr "Alterações não salvas"
+
+msgctxt "Transfer"
+msgid "Format"
+msgstr "Formato"
+
+msgctxt "Transfer"
+msgid "Projects to export"
+msgstr "Projetos para exportar"
+
+msgctxt "Transfer"
+msgid "Folder to save the files in"
+msgstr "Pasta onde salvar os arquivos"
+
+msgctxt "Transfer"
+msgid "Adds the folders, requests and environments of an Insomnia v5 export (YAML) as a new project."
+msgstr "Adiciona as pastas, requisições e ambientes de uma exportação v5 do Insomnia (YAML) como um novo projeto."
+
+msgctxt "Transfer"
+msgid "Saves each ticked project, with its folders, requests and environments, to its own file in the folder."
+msgstr "Salva cada projeto marcado, com suas pastas, requisições e ambientes, em um arquivo próprio na pasta."
+
+msgctxt "Transfer"
+msgid "Adds the project stored in a file as a new project."
+msgstr "Adiciona o projeto guardado em um arquivo como um novo projeto."
+
+msgctxt "Transfer"
+msgid "Path of the file"
+msgstr "Caminho do arquivo"
+
+msgctxt "Transfer"
+msgid "Browse…"
+msgstr "Procurar…"
+
+msgctxt "Transfer"
+msgid "Include environment values and auth secrets"
+msgstr "Incluir valores dos ambientes e segredos de autenticação"
+
+msgctxt "Transfer"
+msgid "Without them the file is safe to share: environment keys stay, their values are emptied, and so are tokens and passwords."
+msgstr "Sem eles o arquivo é seguro para compartilhar: as chaves dos ambientes ficam, os valores são esvaziados, assim como tokens e senhas."
+
+msgctxt "Transfer"
+msgid "Close"
+msgstr "Fechar"
+
+msgctxt "Transfer"
+msgid "Export"
+msgstr "Exportar"
+
+msgctxt "Transfer"
+msgid "Import"
+msgstr "Importar"
+
+msgctxt "Sidebar"
+msgid "Manage"
+msgstr "Gerenciar"
+
+msgctxt "Sidebar"
+msgid "Environments"
+msgstr "Ambientes"
+
+msgctxt "Sidebar"
+msgid "New folder"
+msgstr "Nova pasta"
+
+msgctxt "Sidebar"
+msgid "New request"
+msgstr "Nova requisição"
+
+msgctxt "Sidebar"
+msgid "Rename (F2)"
+msgstr "Renomear (F2)"
+
+msgctxt "Sidebar"
+msgid "Delete"
+msgstr "Excluir"
+
+msgctxt "Main"
+msgid "Preferences"
+msgstr "Preferências"
+
+msgctxt "Main"
+msgid "Previous match"
+msgstr "Ocorrência anterior"
+
+msgctxt "Main"
+msgid "Next match"
+msgstr "Próxima ocorrência"
+
+msgctxt "Main"
+msgid "Close search"
+msgstr "Fechar a busca"
+
+msgctxt "KeyValueLine"
+msgid "Remove row"
+msgstr "Remover linha"
+
+msgctxt "MenuCard"
+msgid "Close"
+msgstr "Fechar"
+
+msgctxt "MainMenu"
+msgid "Preferences"
+msgstr "Preferências"
+
+msgctxt "MainMenu"
+msgid "Appearance"
+msgstr "Aparência"
+
+msgctxt "MainMenu"
+msgid "System"
+msgstr "Sistema"
+
+msgctxt "MainMenu"
+msgid "Light"
+msgstr "Claro"
+
+msgctxt "MainMenu"
+msgid "Dark"
+msgstr "Escuro"
+
+msgctxt "MainMenu"
+msgid "Language"
+msgstr "Idioma"
+
+msgctxt "MenuCard"
+msgid "About"
+msgstr "Sobre"
+
+msgctxt "ManageMenu"
+msgid "Manage"
+msgstr "Gerenciar"
+
+msgctxt "ManageMenu"
+msgid "New project"
+msgstr "Novo projeto"
+
+msgctxt "ManageMenu"
+msgid "Rename project"
+msgstr "Renomear projeto"
+
+msgctxt "ManageMenu"
+msgid "Delete project"
+msgstr "Excluir projeto"
+
+msgctxt "ManageMenu"
+msgid "Export"
+msgstr "Exportar"
+
+msgctxt "ManageMenu"
+msgid "Import"
+msgstr "Importar"
+
+msgctxt "ManageMenu"
+msgid "Global config"
+msgstr "Configuração global"
+
+msgctxt "Sidebar"
+msgid "No projects yet. Open Manage and choose New project."
+msgstr "Nenhum projeto ainda. Abra Gerenciar e escolha Novo projeto."
+
+msgctxt "Sidebar"
+msgid "Empty project. Add a folder or a request."
+msgstr "Projeto vazio. Adicione uma pasta ou uma requisição."
+
+msgctxt "Prompt"
+msgid "Cancel"
+msgstr "Cancelar"
+
+msgctxt "KeyValueLine"
+msgid "Key"
+msgstr "Chave"
+
+msgctxt "KeyValueLine"
+msgid "Value"
+msgstr "Valor"
+
+msgctxt "KeyValueLine"
+msgid "Description"
+msgstr "Descrição"
+
+msgctxt "About"
+msgid "A light and fast REST API client built with Rust and Slint."
+msgstr "Um cliente de API REST leve e rápido feito com Rust e Slint."
+
+msgctxt "AboutCard"
+msgid "Version {}"
+msgstr "Versão {}"
+
+msgctxt "AboutCard"
+msgid "Author: {}"
+msgstr "Autor: {}"
+
+msgctxt "AboutCard"
+msgid "License: {}"
+msgstr "Licença: {}"
+
+msgctxt "AboutCard"
+msgid "Close"
+msgstr "Fechar"

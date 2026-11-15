@@ -1,0 +1,59 @@
+import { Button, LineEdit, Palette, VerticalBox } from "std-widgets.slint";
+import { Family } from "family.slint";
+
+// An in-window dialog (like About, not a second window): a title, a message, and optionally one text field.
+export component Prompt inherits Rectangle {
+    in property <string> title;
+    in property <string> message;
+    in property <bool> with-input: false;
+    in property <string> confirm-label;
+    in-out property <string> text;
+    callback confirmed(string);
+    callback dismiss();
+    background: Family.scrim;
+    init => { if !root.with-input { keys.focus(); } }
+
+    // Swallows clicks so nothing behind the overlay is reachable; a click outside the card closes it.
+    TouchArea { clicked => { root.dismiss(); } }
+    // `capture-key-pressed` so Escape works while the text field has the focus.
+    keys := FocusScope {
+        capture-key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.dismiss();
+                return accept;
+            }
+            if event.text == Key.Return && !root.with-input {
+                root.confirmed("");
+                return accept;
+            }
+            return reject;
+        }
+        Rectangle {
+            width: 360px;
+            height: box.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border;
+            TouchArea { }
+            box := VerticalBox {
+                alignment: start;
+                Text { text: root.title; font-size: Family.page-title; font-weight: Family.page-weight; wrap: word-wrap; }
+                if root.message != "": Text { text: root.message; wrap: word-wrap; }
+                if root.with-input: LineEdit {
+                    text <=> root.text;
+                    init => { self.focus(); self.select-all(); }
+                    accepted => { root.confirmed(root.text); }
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    Button { text: @tr("Cancel"); clicked => { root.dismiss(); } }
+                    Button { text: root.confirm-label; primary: true; clicked => { root.confirmed(root.text); } }
+                }
+            }
+        }
+    }
+}

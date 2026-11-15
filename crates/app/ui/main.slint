@@ -1,0 +1,810 @@
+import { Button, CheckBox, ComboBox, LineEdit, Palette, TextEdit, VerticalBox } from "std-widgets.slint";
+import { AlertIcon, CloseButton, GhostButton, SearchBox, StepButton, TabBar, TabItem } from "controls.slint";
+import { CodeEdit, CodeEditing } from "code-edit.slint";
+import { EnvEditor } from "env-editor.slint";
+import { KeyValueRow, KeyValueTable } from "kv-table.slint";
+import { MainMenu, ManageMenu } from "menu.slint";
+import { Prompt } from "prompt.slint";
+import { Sidebar, TreeRow } from "sidebar.slint";
+import { ExportRow, Transfer } from "transfer.slint";
+import { Family } from "family.slint";
+import { AboutCard } from "about.slint";
+import { VarAssist, VarLineEdit } from "var-popup.slint";
+
+export { CodeEditing, ExportRow, KeyValueRow, TreeRow, VarAssist }
+
+// A match of the response search: byte offsets into the shown text, and its place among `total` matches.
+export struct Found { start: int, end: int, index: int, total: int }
+
+// Strings built in Rust go through this global (never `format!` user-visible text in Rust).
+export global Tr {
+    public pure function ms(n: int) -> string { return @tr("{} ms", n); }
+    public pure function size(bytes: int) -> string {
+        if bytes < 1024 { return @tr("{} B", bytes); }
+        return @tr("{} KB", round(bytes / 102.4) / 10);
+    }
+    public pure function undefined-vars(names: string) -> string { return @tr("Undefined variables: {}", names); }
+    // Name given to a new item before the user renames it. `kind`: 0 project, 1 folder, 2 request, 3 environment.
+    public pure function default-name(kind: int) -> string {
+        if kind == 0 { return @tr("New project"); }
+        if kind == 1 { return @tr("New folder"); }
+        if kind == 3 { return @tr("New environment"); }
+        return @tr("New request");
+    }
+    public pure function no-environment() -> string { return @tr("No environment"); }
+    // Result of an export or import. `kind`: 1 exported one file, 2 imported (both successes; `detail` is the path or
+    // the project name), 12 imported several projects (`detail` is how many), 13 exported several files (`count`
+    // files into the folder `detail`), then the failures: 3 empty path, 14 a file of the export exists (`detail` is
+    // its name, nothing was saved), 15 empty folder, 5 cannot write, 6 cannot read, 7 not a project file, 8 invalid
+    // JSON, 9 made by a newer version, 10 not an Insomnia v5 export, 11 invalid YAML.
+    public pure function transfer-message(kind: int, detail: string, count: int) -> string {
+        if kind == 1 { return @tr("Saved to {}", detail); }
+        if kind == 2 { return @tr("Imported the project \"{}\".", detail); }
+        if kind == 3 { return @tr("Enter the path of a file."); }
+        if kind == 13 { return @tr("Saved {} files to {}", count, detail); }
+        if kind == 14 { return @tr("A file named {} already exists in that folder. Nothing was saved.", detail); }
+        if kind == 15 { return @tr("Enter the path of a folder."); }
+        if kind == 5 { return @tr("Cannot write the file: {}", detail); }
+        if kind == 6 { return @tr("Cannot read the file: {}", detail); }
+        if kind == 7 { return @tr("This is not a FastApiClient project file."); }
+        if kind == 8 { return @tr("The file is not valid JSON: {}", detail); }
+        if kind == 10 { return @tr("This is not an Insomnia v5 export (YAML)."); }
+        if kind == 11 { return @tr("The file is not valid YAML: {}", detail); }
+        if kind == 12 { return @tr("Imported {} projects.", detail); }
+        return @tr("This file was made by a newer version of FastApiClient.");
+    }
+    public pure function delete-env-message(name: string) -> string {
+        return @tr("Delete the environment \"{}\"? This cannot be undone.", name);
+    }
+    // `kind`: 1 the text is not valid JSON (`detail` is the parser's message), 2 it is valid but not an object.
+    public pure function env-error(kind: int, detail: string) -> string {
+        if kind == 1 { return @tr("Invalid JSON, not saved yet: {}", detail); }
+        return @tr("The value must be a JSON object, like {{ \"host\": \"example.com\" }}. Not saved yet.");
+    }
+    public pure function send-file-message(path: string, host: string) -> string {
+        return @tr("This request uploads the file {} to {}. Only send it if you trust that server.", path, host);
+    }
+    public pure function delete-message(kind: int, name: string) -> string {
+        if kind == 0 { return @tr("Delete the project \"{}\" and everything in it? This cannot be undone.", name); }
+        if kind == 1 { return @tr("Delete the folder \"{}\" and its requests? This cannot be undone.", name); }
+        return @tr("Delete the request \"{}\"? This cannot be undone.", name);
+    }
+    // `kind` is the failure the core reported; `detail` is the header name, file path or network message.
+    // `extra` is the name of the request a `$response` needed (kinds 6 and 7).
+    public pure function error(kind: int, detail: string, extra: string) -> string {
+        if kind == 0 { return @tr("The URL is not valid."); }
+        if kind == 1 { return @tr("The HTTP method is not valid."); }
+        if kind == 2 { return @tr("The header \"{}\" is not valid.", detail); }
+        if kind == 3 { return @tr("Cannot read the body file: {}", detail); }
+        if kind == 4 { return @tr("OAuth 2.0 is not available yet."); }
+        if kind == 6 { return @tr("The request \"{}\" that this one needs failed: {}", extra, detail); }
+        if kind == 7 { return @tr("The request \"{}\" needs its own response.", extra); }
+        return @tr("The request failed: {}", detail);
+    }
+}
+
+// An in-window overlay, not a second window: closing Main always ends the app, and ui-snapshot.sh can capture it.
+component About inherits Rectangle {
+    in property <string> version;
+    callback dismiss();
+    callback open-website();
+    background: Family.scrim;
+    init => { keys.focus(); }
+
+    // Swallows clicks so nothing behind the overlay is reachable; a click outside the card closes it.
+    TouchArea { clicked => { root.dismiss(); } }
+    keys := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.dismiss();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    Rectangle {
+        width: min(Family.dialog-width, parent.width - 32px);
+        height: box.preferred-height;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Palette.background;
+        border-radius: Family.radius;
+        border-width: 1px;
+        border-color: Palette.border;
+        TouchArea { }
+        box := VerticalLayout {
+            padding: 16px;
+            AboutCard {
+                icon: @image-url("../../../packaging/io.github.evandro777.FastApiClient.svg");
+                name: "FastApiClient";
+                version: root.version;
+                description: @tr("A light and fast REST API client built with Rust and Slint.");
+                url: "github.com/evandro777/FastApiClient";
+                link-clicked(_) => { root.open-website(); }
+                close => { root.dismiss(); }
+            }
+        }
+    }
+}
+
+export component Main inherits Window {
+    in property <string> version;
+    in-out property <bool> about-open: false;
+    in-out property <bool> menu-open: false; // the Preferences dialog
+    in-out property <bool> auto-beautify: true; // saved in settings; also the starting state of the Beautify button
+    // 0 follows the system, 1 light, 2 dark (settings.theme, saved as soon as it changes). Palette.color-scheme is the
+    // only palette property an app can set; the colors still follow the system accent.
+    in-out property <int> color-scheme-index: 0;
+    // 0 follows the system, 1 English, 2 Português (settings.language, saved as soon as it changes).
+    in-out property <int> language-index: 0;
+    callback language-changed(int);
+    callback theme-changed(int);
+    changed color-scheme-index => {
+        Palette.color-scheme = root.color-scheme-index == 1 ? ColorScheme.light
+            : root.color-scheme-index == 2 ? ColorScheme.dark : ColorScheme.unknown;
+        root.theme-changed(root.color-scheme-index);
+    }
+    in-out property <bool> manage-open: false; // the Manage menu (projects, import, export, global config)
+    // Request tab: 0 Params, 1 Headers, 2 Body, 3 Auth. `in-out` so FASTAPICLIENT_PAGE can open one directly
+    // (scripts/ui-snapshot.sh). Projects and folders only have Headers and Auth.
+    in-out property <int> tab: 0;
+
+    // The tree and what is selected in it. `selected-kind`: -1 nothing, 0 project, 1 folder, 2 request.
+    in property <[TreeRow]> tree-rows;
+    in property <int> selected-kind: -1;
+    in property <string> selected-name;
+    in-out property <bool> prompt-open: false;
+    // 0 rename the selection, 1 delete it, 2 new environment, 3 rename environment, 4 delete environment, 5 new
+    // project, 6 rename project, 7 delete project, 8 confirm sending the file body of the request
+    in-out property <int> prompt-kind: 0;
+    // Set by Rust with kind 8: the file and the host it would go to.
+    in-out property <string> send-file-path;
+    in-out property <string> send-file-host;
+    in-out property <string> prompt-text;
+
+    // All projects, and the active one (the tree and the environments follow it).
+    in property <[string]> project-options;
+    in-out property <int> project-index: 0;
+
+    // Environments of the selected project. `env-options` starts with "no environment".
+    in property <[string]> env-options;
+    in-out property <int> env-active-index: 0;
+    in property <[string]> env-names;
+    // Variables of the active environment, offered after `{{` or Ctrl+Space.
+    in property <[string]> var-names;
+    in property <bool> demo-vars; // snapshot script only: shows the variable list of the URL field
+    in-out property <bool> envs-open: false;
+    in-out property <int> env-edit-index: 0;
+    in-out property <string> env-text;
+    in-out property <bool> env-dirty: false; // the text has changes that were not saved with the Save button
+    in property <int> env-error-kind: -1; // -1 none, else a `Tr.env-error` kind
+    in property <string> env-error-detail;
+
+    // Export (mode 0) and import (mode 1) dialog. `transfer-kind` is a `Tr.transfer-message` kind, -1 for none.
+    in-out property <bool> transfer-open: false;
+    in-out property <int> transfer-mode: 0;
+    in-out property <int> transfer-format: 0; // import: 0 FastApiClient, 1 Insomnia V5.1
+    in-out property <string> transfer-path; // the folder (export) or the file (import)
+    in property <[ExportRow]> export-rows;
+    in property <int> transfer-selected: 0; // ticked rows of `export-rows`
+    in property <int> transfer-count: 0; // files written, for kind 13
+    in-out property <bool> transfer-include: false;
+    in-out property <bool> transfer-picking: false;
+    in property <int> transfer-kind: -1;
+    in property <string> transfer-detail;
+
+    // The node being edited. Rust loads it on selection and reads it back every second and on close.
+    in property <[string]> methods;
+    in-out property <int> method-index: 0;
+    in-out property <string> url;
+    in-out property <int> body-type: 0; // 0 none, 1 form data, 2 form URL, 3 JSON, 4 XML, 5 file
+    in-out property <string> body-text;
+    in-out property <string> body-file;
+    in-out property <int> auth-type: 0; // 0 inherit, 1 none, 2 basic, 3 bearer, 4 OAuth 2.0
+    in-out property <string> auth-username;
+    in-out property <string> auth-password;
+    in-out property <string> auth-token;
+    in property <[KeyValueRow]> query-rows;
+    in property <[KeyValueRow]> header-rows;
+    in property <[KeyValueRow]> form-rows;
+
+    // The last answer.
+    in property <bool> sending: false;
+    in property <int> error-kind: -1; // -1 none; otherwise a `Tr.error` kind
+    in property <string> error-detail;
+    in property <string> error-extra;
+    in property <string> warning-vars;
+    in property <bool> has-response: false;
+    in property <int> status;
+    in property <string> reason;
+    in property <int> time-ms;
+    in property <int> size-bytes;
+    in property <bool> truncated;
+    in property <string> response-body;
+    // Re-indented body, empty when the body is not a JSON object/array (then there is no Beautify button).
+    in property <string> response-pretty;
+    in-out property <bool> response-beautify;
+    in property <string> response-headers;
+    in-out property <int> response-tab: 0; // 0 body, 1 headers, 2 request
+    in property <string> request-log;
+    in-out property <bool> search-open: false;
+    in-out property <string> search-text;
+    property <int> search-focus: 0;
+    pure callback find(string, string, int, bool) -> Found;
+    callback open-external(string);
+
+    callback send();
+    // The user agreed to the "send a file" dialog (prompt kind 8).
+    callback send-confirmed();
+    callback open-website();
+    callback select(int, int, int);
+    callback step(int);
+    in property <int> tree-selected: -1; // position of the selected row in `tree-rows`, -1 for none
+    callback project-activated(int);
+    callback new-project(string); // creates the project with this name; asked for by the prompt (kind 5)
+    callback new-folder();
+    callback new-request();
+    callback rename(string);
+    callback delete-selected();
+    callback rename-project(string);
+    callback delete-project();
+    callback global-config(); // opens the selected project itself: its shared headers and auth
+    callback env-activated(int);
+    // Rust prepares the editor (text, index) before the overlay opens.
+    callback manage-envs();
+    callback env-picked(int);
+    callback env-edited(string);
+    callback env-save(string);
+    callback env-add(string);
+    callback env-rename(string);
+    callback env-delete();
+    // Rust sets a default path and clears the last message before the dialog opens.
+    callback transfer-prepare(int);
+    callback transfer-run();
+    callback transfer-browse();
+    callback export-toggled(int, bool);
+    // The first argument is the table: 0 query, 1 headers, 2 form body.
+    callback kv-edited(int, int, KeyValueRow);
+    callback kv-removed(int, int);
+    title: "FastApiClient";
+    min-width: 900px;
+    min-height: 560px;
+
+    // A new item is created and selected by Rust; the rename dialog then opens on its default name.
+    function ask-name() {
+        root.prompt-kind = 0;
+        root.prompt-text = root.selected-name;
+        root.prompt-open = true;
+    }
+    pure function prompt-title(kind: int) -> string {
+        if kind == 2 { return @tr("New environment"); }
+        if kind == 5 { return @tr("New project"); }
+        if kind == 6 { return @tr("Rename project"); }
+        if kind == 8 { return @tr("Send a file?"); }
+        if kind == 1 || kind == 4 || kind == 7 { return @tr("Delete"); }
+        return @tr("Rename");
+    }
+    pure function prompt-confirm(kind: int) -> string {
+        if kind == 8 { return @tr("Send"); }
+        if kind == 2 || kind == 5 { return @tr("Create"); }
+        if kind == 1 || kind == 4 || kind == 7 { return @tr("Delete"); }
+        return @tr("Rename");
+    }
+    pure function prompt-message(kind: int) -> string {
+        if kind == 1 { return Tr.delete-message(root.selected-kind, root.selected-name); }
+        if kind == 7 { return Tr.delete-message(0, root.project-options[root.project-index]); }
+        if kind == 4 { return Tr.delete-env-message(root.env-names[root.env-edit-index]); }
+        if kind == 8 { return Tr.send-file-message(root.send-file-path, root.send-file-host); }
+        return "";
+    }
+
+    HorizontalLayout {
+        sidebar := Sidebar {
+            width: 300px;
+            menu => { root.menu-open = true; }
+            rows: root.tree-rows;
+            has-selection: root.selected-kind >= 0;
+            project-options: root.project-options;
+            project-index <=> root.project-index;
+            project-activated(i) => { root.project-activated(i); }
+            env-options: root.env-options;
+            env-active-index <=> root.env-active-index;
+            env-activated(i) => { root.env-activated(i); }
+            manage-envs => { root.manage-envs(); root.envs-open = true; }
+            send => { root.send(); }
+            select(p, f, r) => { root.select(p, f, r); }
+            selected-index: root.tree-selected;
+            step(d) => { root.step(d); }
+            manage => { root.manage-open = true; }
+            new-folder => { root.new-folder(); root.ask-name(); }
+            new-request => { root.new-request(); root.ask-name(); }
+            rename => { root.ask-name(); }
+            delete => { root.prompt-kind = 1; root.prompt-open = true; }
+        }
+
+        // Ctrl+Enter sends from anywhere in the editor, even from inside a text field (`capture-` so the field does not
+        // take the Enter first).
+        FocusScope {
+            horizontal-stretch: 1;
+            capture-key-pressed(event) => {
+                if event.text == Key.Return && event.modifiers.control && root.selected-kind == 2 {
+                    root.send();
+                    return accept;
+                }
+                // Ctrl+F finds in the response panel, when it is showing.
+                if event.text == "f" && event.modifiers.control && root.selected-kind == 2 && !root.sending
+                    && root.request-log != "" {
+                    root.search-open = true;
+                    root.search-focus += 1;
+                    return accept;
+                }
+                return reject;
+            }
+
+        VerticalLayout {
+            padding: 8px;
+            spacing: 8px;
+
+            if root.selected-kind < 0: VerticalLayout {
+                vertical-stretch: 1;
+                alignment: center;
+                spacing: 12px;
+                Text {
+                    text: @tr("Create a project: open Manage and choose New project, then add a request.");
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    Button {
+                        text: @tr("New project");
+                        primary: true;
+                        clicked => { root.prompt-kind = 5; root.prompt-text = ""; root.prompt-open = true; }
+                    }
+                }
+            }
+
+            if root.selected-kind >= 0: VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 8px;
+
+                if root.selected-kind == 2: HorizontalLayout {
+                    spacing: 6px;
+                    ComboBox {
+                        width: 110px;
+                        model: root.methods;
+                        current-index <=> root.method-index;
+                    }
+                    VarLineEdit {
+                        horizontal-stretch: 1;
+                        var-names: root.var-names;
+                        demo-open: root.demo-vars;
+                        text <=> root.url;
+                        placeholder-text: @tr("https://example.com/api");
+                        accepted => { root.send(); }
+                    }
+                    Button {
+                        text: root.sending ? @tr("Sending…") : @tr("Send");
+                        primary: true;
+                        enabled: !root.sending;
+                        clicked => { root.send(); }
+                    }
+                }
+                if root.selected-kind == 2 && root.warning-vars != "": HorizontalLayout {
+                    spacing: 6px;
+                    VerticalLayout { alignment: center; AlertIcon { } }
+                    Text {
+                        text: Tr.undefined-vars(root.warning-vars);
+                        color: Family.warning;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                }
+                if root.selected-kind < 2: HorizontalLayout {
+                    spacing: 6px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 4px;
+                        Text {
+                            text: root.selected-name;
+                            font-size: Family.title;
+                            font-weight: Family.section-weight;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: root.selected-kind == 0
+                                ? @tr("Headers and auth set here apply to every request in this project.")
+                                : @tr("Headers and auth set here apply to every request in this folder.");
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Page tabs are underlined (the family rule); the underline row has a hairline under it.
+                if root.selected-kind == 2: TabBar {
+                    // `id` is the tab number the rest of the app uses; only the order of the tabs is chosen here.
+                    for t in [
+                        // The tables always end in one blank row, which is not an entry.
+                        { label: @tr("Params"), id: 0, count: max(0, root.query-rows.length - 1), dot: false },
+                        { label: @tr("Body"), id: 2, count: 0, dot: root.body-type != 0 },
+                        { label: @tr("Auth"), id: 3, count: 0, dot: root.auth-type >= 2 },
+                        { label: @tr("Headers"), id: 1, count: max(0, root.header-rows.length - 1), dot: false },
+                    ]: TabItem {
+                        title: t.label;
+                        count: t.count;
+                        dot: t.dot;
+                        active: root.tab == t.id;
+                        clicked => { root.tab = t.id; }
+                    }
+                }
+                if root.selected-kind < 2: TabBar {
+                    TabItem { title: @tr("Auth"); dot: root.auth-type >= 2; active: root.tab == 3; clicked => { root.tab = 3; } }
+                    TabItem { title: @tr("Headers"); count: max(0, root.header-rows.length - 1); active: root.tab == 1; clicked => { root.tab = 1; } }
+                }
+
+                // The request editor and the response share the height.
+                VerticalLayout {
+                    vertical-stretch: 1;
+                    min-height: 120px;
+                    if root.tab == 0 && root.selected-kind == 2: KeyValueTable {
+                            var-names: root.var-names;
+                        rows: root.query-rows;
+                        edited(i, r) => { root.kv-edited(0, i, r); }
+                        removed(i) => { root.kv-removed(0, i); }
+                    }
+                    if root.tab == 1: KeyValueTable {
+                            var-names: root.var-names;
+                        rows: root.header-rows;
+                        edited(i, r) => { root.kv-edited(1, i, r); }
+                        removed(i) => { root.kv-removed(1, i); }
+                    }
+                    if root.tab == 2 && root.selected-kind == 2: VerticalLayout {
+                        spacing: 8px;
+                        HorizontalLayout {
+                            alignment: start;
+                            ComboBox {
+                                width: 220px;
+                                model: [@tr("No body"), @tr("Form data"), @tr("Form URL encoded"), @tr("JSON"), @tr("XML"), @tr("File")];
+                                current-index <=> root.body-type;
+                            }
+                        }
+                        if root.body-type == 0: Text {
+                            text: @tr("This request has no body.");
+                            vertical-stretch: 1;
+                        }
+                        if root.body-type == 1 || root.body-type == 2: KeyValueTable {
+                            var-names: root.var-names;
+                            rows: root.form-rows;
+                            edited(i, r) => { root.kv-edited(2, i, r); }
+                            removed(i) => { root.kv-removed(2, i); }
+                        }
+                        if root.body-type == 3 || root.body-type == 4: CodeEdit {
+                            var-assist: true;
+                            var-names: root.var-names;
+                            text <=> root.body-text;
+                        }
+                        if root.body-type == 5: VerticalLayout {
+                            spacing: 8px;
+                            LineEdit { text <=> root.body-file; placeholder-text: @tr("Path of the file to send"); }
+                            Rectangle { vertical-stretch: 1; }
+                        }
+                    }
+                    if root.tab == 3: VerticalLayout {
+                        alignment: start;
+                        spacing: 8px;
+                        HorizontalLayout {
+                            alignment: start;
+                            ComboBox {
+                                width: 220px;
+                                model: [@tr("Inherit from parent"), @tr("None"), @tr("Basic"), @tr("Bearer token"), @tr("OAuth 2.0")];
+                                current-index <=> root.auth-type;
+                            }
+                        }
+                        if root.auth-type == 0: Text {
+                            text: @tr("Uses the auth of the parent folder or project.");
+                            wrap: word-wrap;
+                        }
+                        if root.auth-type == 1: Text {
+                            text: @tr("No authentication is sent.");
+                            wrap: word-wrap;
+                        }
+                        if root.auth-type == 2: VerticalLayout {
+                            spacing: 8px;
+                            Text { text: @tr("Username"); color: Family.muted; font-size: Family.caption; }
+                            VarLineEdit { var-names: root.var-names; text <=> root.auth-username; placeholder-text: @tr("Username"); }
+                            Text { text: @tr("Password"); color: Family.muted; font-size: Family.caption; }
+                            VarLineEdit {
+                                var-names: root.var-names;
+                                text <=> root.auth-password;
+                                placeholder-text: @tr("Password");
+                                input-type: InputType.password;
+                            }
+                        }
+                        if root.auth-type == 3: VerticalLayout {
+                            spacing: 8px;
+                            Text { text: @tr("Token"); color: Family.muted; font-size: Family.caption; }
+                            VarLineEdit {
+                                var-names: root.var-names;
+                                text <=> root.auth-token;
+                                placeholder-text: @tr("Token");
+                                input-type: InputType.password;
+                            }
+                            Text {
+                                text: @tr("Sent in the Authorization header as a Bearer token.");
+                                color: Family.muted;
+                                font-size: Family.caption;
+                                wrap: word-wrap;
+                            }
+                        }
+                        if root.auth-type == 4: Text {
+                            text: @tr("OAuth 2.0 settings cannot be edited yet; what is stored is kept as it is.");
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                if root.selected-kind == 2: Rectangle { height: 1px; background: Palette.border; }
+
+                if root.selected-kind == 2: VerticalLayout {
+                    vertical-stretch: 1;
+                    min-height: 140px;
+                    spacing: 6px;
+                    HorizontalLayout {
+                        spacing: 12px;
+                        if root.error-kind >= 0: Text {
+                            text: Tr.error(root.error-kind, root.error-detail, root.error-extra);
+                            color: Family.danger;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                        }
+                        if root.error-kind < 0 && root.sending: Text { text: @tr("Waiting for the response…"); }
+                        if root.error-kind < 0 && !root.sending && !root.has-response: Text {
+                            text: @tr("Send a request (Ctrl+Enter) to see the response here.");
+                        }
+                        if root.error-kind < 0 && root.has-response: HorizontalLayout {
+                            alignment: start;
+                            spacing: 12px;
+                            chip := Rectangle {
+                                property <color> tone: root.status < 300 ? Family.success : root.status < 400 ? Family.warning : Family.danger;
+                                background: self.tone.with-alpha(0.16);
+                                border-radius: Family.control-radius;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    padding-top: 3px;
+                                    padding-bottom: 3px;
+                                    Text {
+                                        text: "\{root.status} \{root.reason}";
+                                        font-weight: Family.section-weight;
+                                        color: chip.tone;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            Text { text: Tr.ms(root.time-ms); color: Family.muted; vertical-alignment: center; }
+                            Text { text: Tr.size(root.size-bytes); color: Family.muted; vertical-alignment: center; }
+                            if root.truncated: Text { text: @tr("Truncated at 1 MB"); color: Family.warning; vertical-alignment: center; }
+                        }
+                    }
+                    // The Request tab also shows after a network error, which is when it helps most. Everything below shares
+                    // one condition so `panel` can reach the text it searches.
+                    if !root.sending && root.request-log != "": panel := VerticalLayout {
+                        vertical-stretch: 1;
+                        spacing: 6px;
+                        property <string> shown: !root.has-response || root.response-tab == 2 ? root.request-log
+                            : root.response-tab == 0
+                            ? (root.response-beautify && root.response-pretty != "" ? root.response-pretty : root.response-body)
+                            : root.response-headers;
+                        property <Found> found;
+                        // Selects the match in the (unfocused) text, which also scrolls it into view.
+                        function search(from: int, backward: bool) {
+                            self.found = root.find(self.shown, root.search-text, from, backward);
+                            if self.found.total > 0 {
+                                response-text.set-selection-offsets(self.found.start, self.found.end);
+                            }
+                        }
+                        changed shown => { if root.search-open { self.search(0, false); } }
+
+                        TabBar {
+                            gap: 8px;
+                            HorizontalLayout {
+                                horizontal-stretch: 0;
+                                if root.has-response: TabItem {
+                                    title: @tr("Response body");
+                                    active: root.response-tab == 0;
+                                    clicked => { root.response-tab = 0; }
+                                }
+                                if root.has-response: TabItem {
+                                    title: @tr("Response headers");
+                                    active: root.response-tab == 1;
+                                    clicked => { root.response-tab = 1; }
+                                }
+                                TabItem {
+                                    title: @tr("Request");
+                                    active: !root.has-response || root.response-tab == 2;
+                                    clicked => { root.response-tab = 2; }
+                                }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            if root.has-response && root.response-tab == 0 && root.response-pretty != "": CheckBox {
+                                text: @tr("Beautify");
+                                checked <=> root.response-beautify;
+                            }
+                            GhostButton {
+                                text: @tr("Copy");
+                                clicked => { response-text.select-all(); response-text.copy(); }
+                            }
+                            GhostButton {
+                                text: @tr("Open in editor");
+                                clicked => { root.open-external(panel.shown); }
+                            }
+                            GhostButton {
+                                text: @tr("Find");
+                                clicked => { root.search-open = true; root.search-focus += 1; }
+                            }
+                        }
+                        if root.search-open: FocusScope {
+                            key-pressed(event) => {
+                                if event.text == Key.Escape {
+                                    root.search-open = false;
+                                    response-text.set-selection-offsets(0, 0);
+                                    return accept;
+                                }
+                                return reject;
+                            }
+                            HorizontalLayout {
+                                spacing: 4px;
+                                // Ctrl+F while the bar is already open brings the focus back to it.
+                                property <int> tick: root.search-focus;
+                                changed tick => { search-field.focus(); search-field.select-all(); }
+                                search-field := SearchBox {
+                                    horizontal-stretch: 1;
+                                    placeholder: @tr("Find in the response");
+                                    text <=> root.search-text;
+                                    // Esc closes the bar at once, instead of first clearing the box.
+                                    key(event) => {
+                                        if event.text == Key.Escape {
+                                            root.search-open = false;
+                                            response-text.set-selection-offsets(0, 0);
+                                            return accept;
+                                        }
+                                        return reject;
+                                    }
+                                    init => { self.focus(); self.select-all(); panel.search(0, false); }
+                                    edited => { panel.search(panel.found.total > 0 ? panel.found.start : 0, false); }
+                                    accepted => { panel.search(panel.found.start + 1, false); }
+                                }
+                                if root.search-text != "": Text {
+                                    vertical-alignment: center;
+                                    text: panel.found.total > 0 ? "\{panel.found.index + 1}/\{panel.found.total}" : "0/0";
+                                    color: panel.found.total > 0 ? Palette.foreground : Family.danger;
+                                }
+                                StepButton { up: true; label: @tr("Previous match"); clicked => { panel.search(panel.found.start, true); } }
+                                StepButton { up: false; label: @tr("Next match"); clicked => { panel.search(panel.found.start + 1, false); } }
+                                CloseButton {
+                                    y: (parent.height - self.height) / 2;
+                                    label: @tr("Close search");
+                                    clicked => {
+                                        root.search-open = false;
+                                        response-text.set-selection-offsets(0, 0);
+                                    }
+                                }
+                            }
+                        }
+                        response-text := TextEdit {
+                            read-only: true;
+                            text: panel.shown;
+                        }
+                    }
+                }
+            }
+        }
+        }
+    }
+
+    // Last children, outside the layout, so they draw on top. Each hands the keyboard back to the tree when it
+    // closes, so F2 keeps working.
+    if root.menu-open: MainMenu {
+        width: root.width;
+        height: root.height;
+        auto-beautify <=> root.auto-beautify;
+        color-scheme-index <=> root.color-scheme-index;
+        language-index <=> root.language-index;
+        language-changed(i) => { root.language-changed(i); }
+        toggled => { root.response-beautify = root.auto-beautify; }
+        about => { root.menu-open = false; root.about-open = true; }
+        dismiss => { root.menu-open = false; sidebar.focus-tree(); }
+    }
+    if root.manage-open: ManageMenu {
+        width: root.width;
+        height: root.height;
+        has-project: root.project-options.length > 0;
+        // Nothing is created until a name is entered and confirmed.
+        new-project => { root.manage-open = false; root.prompt-kind = 5; root.prompt-text = ""; root.prompt-open = true; }
+        rename-project => {
+            root.manage-open = false;
+            root.prompt-kind = 6;
+            root.prompt-text = root.project-options[root.project-index];
+            root.prompt-open = true;
+        }
+        delete-project => { root.manage-open = false; root.prompt-kind = 7; root.prompt-open = true; }
+        import => { root.manage-open = false; root.transfer-prepare(1); root.transfer-open = true; }
+        export => { root.manage-open = false; root.transfer-prepare(0); root.transfer-open = true; }
+        global-config => { root.manage-open = false; root.global-config(); sidebar.focus-tree(); }
+        dismiss => { root.manage-open = false; sidebar.focus-tree(); }
+    }
+    if root.about-open: About {
+        width: root.width;
+        height: root.height;
+        version: root.version;
+        dismiss => { root.about-open = false; sidebar.focus-tree(); }
+        open-website => { root.open-website(); }
+    }
+    if root.envs-open: EnvEditor {
+        width: root.width;
+        height: root.height;
+        names: root.env-names;
+        index <=> root.env-edit-index;
+        text <=> root.env-text;
+        error: root.env-error-kind < 0 ? "" : Tr.env-error(root.env-error-kind, root.env-error-detail);
+        dirty <=> root.env-dirty;
+        picked(i) => { root.env-picked(i); }
+        edited(t) => { root.env-edited(t); }
+        save(t) => { root.env-save(t); }
+        add => {
+            root.prompt-kind = 2;
+            root.prompt-text = Tr.default-name(3);
+            root.prompt-open = true;
+        }
+        rename => {
+            root.prompt-kind = 3;
+            root.prompt-text = root.env-names[root.env-edit-index];
+            root.prompt-open = true;
+        }
+        delete => { root.prompt-kind = 4; root.prompt-open = true; }
+        dismiss => { root.envs-open = false; sidebar.focus-tree(); }
+    }
+    if root.transfer-open: Transfer {
+        width: root.width;
+        height: root.height;
+        exporting: root.transfer-mode == 0;
+        format <=> root.transfer-format;
+        path <=> root.transfer-path;
+        include-values <=> root.transfer-include;
+        export-rows: root.export-rows;
+        selected: root.transfer-selected;
+        message: root.transfer-kind < 0 ? "" : Tr.transfer-message(root.transfer-kind, root.transfer-detail, root.transfer-count);
+        ok: root.transfer-kind == 1 || root.transfer-kind == 2 || root.transfer-kind == 12 || root.transfer-kind == 13;
+        picking: root.transfer-picking;
+        toggled(i, on) => { root.export-toggled(i, on); }
+        browse => { root.transfer-browse(); }
+        run => { root.transfer-run(); }
+        dismiss => { root.transfer-open = false; sidebar.focus-tree(); }
+    }
+    // After the environment editor, so a name or confirmation asked from it draws on top.
+    if root.prompt-open: Prompt {
+        width: root.width;
+        height: root.height;
+        with-input: root.prompt-kind == 0 || root.prompt-kind == 2 || root.prompt-kind == 3 || root.prompt-kind == 5
+            || root.prompt-kind == 6;
+        title: root.prompt-title(root.prompt-kind);
+        message: root.prompt-message(root.prompt-kind);
+        confirm-label: root.prompt-confirm(root.prompt-kind);
+        text <=> root.prompt-text;
+        dismiss => { root.prompt-open = false; sidebar.focus-tree(); }
+        confirmed(t) => {
+            root.prompt-open = false;
+            sidebar.focus-tree();
+            if root.prompt-kind == 0 { root.rename(t); }
+            else if root.prompt-kind == 1 { root.delete-selected(); }
+            else if root.prompt-kind == 2 { root.env-add(t); }
+            else if root.prompt-kind == 3 { root.env-rename(t); }
+            else if root.prompt-kind == 5 { root.new-project(t); }
+            else if root.prompt-kind == 6 { root.rename-project(t); }
+            else if root.prompt-kind == 7 { root.delete-project(); }
+            else if root.prompt-kind == 8 { root.send-confirmed(); }
+            else { root.env-delete(); }
+        }
+    }
+}

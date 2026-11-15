@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FastApiClient</title>
+<meta name="description" content="A light and fast REST API client for Linux, written in Rust.">
+<meta property="og:title" content="FastApiClient">
+<meta property="og:description" content="A light and fast REST API client for Linux, written in Rust.">
+<meta property="og:image" content="https://evandro777.github.io/FastApiClient/screenshots/main.png">
+<style>
+  :root { --bg:#fff; --fg:#1d1d20; --muted:#5f6368; --card:#f4f5f7; --accent:#0b7d3c; --border:#dadce0; --warn:#fff4d6; --warn-fg:#5c4400; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#17181a; --fg:#ececee; --muted:#9aa0a6; --card:#222427; --accent:#4cc38a; --border:#34373b; --warn:#33290d; --warn-fg:#f0d98a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.6 system-ui, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 0 16px 64px; }
+  header { padding: 56px 0 16px; text-align: center; }
+  h1 { font-size: 2.6rem; margin: 0; }
+  .tag { color: var(--muted); font-size: 1.15rem; margin: 8px 0 0; }
+  h2 { margin-top: 48px; }
+  a { color: var(--accent); }
+  kbd { background:var(--card); border:1px solid var(--border); border-bottom-width:2px; border-radius:6px; padding:1px 7px; font:.9em ui-monospace, monospace; }
+  .callout { background:var(--warn); color:var(--warn-fg); border-radius:10px; padding:10px 16px; margin:20px 0 0; text-align:center; }
+  .shots { display:grid; grid-template-columns: 1fr 1fr; gap:16px; margin-top:28px; align-items:start; }
+  .shots img { width:100%; height:auto; border-radius:10px; border:1px solid var(--border); }
+  /* One screenshot: centered at its own size instead of half of an empty grid. */
+  .shots img:only-child { grid-column:1 / -1; max-width:600px; justify-self:center; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:12px; }
+  .card { background:var(--card); border-radius:10px; padding:14px 16px; }
+  .card b { display:block; color:var(--accent); }
+  .card span { color:var(--muted); font-size:.92rem; }
+  pre { background:var(--card); padding:14px; border-radius:10px; overflow-x:auto; font-size:.9rem; }
+  details { background:var(--card); border-radius:10px; padding:10px 16px; margin:12px 0; }
+  summary { cursor:pointer; font-weight:600; }
+  small, .note { color:var(--muted); }
+  @media (max-width: 640px) { .shots { grid-template-columns: 1fr; } h1 { font-size: 2.1rem; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>FastApiClient</h1>
+    <p class="tag">A light and fast REST API client for Linux. Send with <kbd>Ctrl</kbd>+<kbd>Enter</kbd>.</p>
+    <p><a href="https://github.com/evandro777/FastApiClient">GitHub</a> ·
+       <a href="https://github.com/evandro777/FastApiClient/releases">Releases</a></p>
+    <p class="callout"><b>Early version.</b> Tested on Linux Mint Cinnamon.</p>
+  </header>
+
+  <div class="shots">
+    <img src="screenshots/main.png" width="1280" height="672" alt="The FastApiClient window">
+  </div>
+
+  <h2>What it does</h2>
+  <p>Written in Rust with Slint, software rendering only, no async runtime.</p>
+  <div class="grid">
+    <div class="card"><b>Light and fast</b><span>Small binary, little memory, starts quickly.</span></div>
+    <div class="card"><b>Projects and folders</b><span>Nested folders; headers and auth are inherited down to each request.</span></div>
+    <div class="card"><b>Environments and variables</b><span>Type <code>{{</code> to pick a variable; ready-made functions like dates.</span></div>
+    <div class="card"><b>Request chaining</b><span>Take a token from another request's response; it is fetched when missing or expired.</span></div>
+    <div class="card"><b>Response panel</b><span>JSON and XML beautify, search, headers, and the request actually sent.</span></div>
+    <div class="card"><b>Insomnia import</b><span>Bring in Insomnia v5 exports, or export your projects as JSON.</span></div>
+  </div>
+
+  <h2>Install with Flatpak (updates itself)</h2>
+  <p>This remote keeps FastApiClient updated with <code>flatpak update</code> and your software centre:</p>
+<pre>flatpak remote-add --system --if-not-exists fastapiclient https://evandro777.github.io/FastApiClient/fastapiclient.flatpakrepo
+flatpak install --system fastapiclient io.github.evandro777.FastApiClient</pre>
+  <p><small>Use <code>--system</code>: Linux Mint's Update Manager only looks at system-wide Flatpaks. The runtime comes from
+     Flathub. The remote is GPG-signed, but the key lives in the
+     <a href="https://github.com/evandro777/FastApiClient">source repository</a>, so it is only as trustworthy as that.</small></p>
+
+  <h2>Or the AppImage</h2>
+  <p>Download <code>FastApiClient-&lt;version&gt;-x86_64.AppImage</code> from the
+     <a href="https://github.com/evandro777/FastApiClient/releases/latest">latest release</a>, <code>chmod +x</code> it and run it.
+     It uses the fontconfig, xkbcommon and X11 libraries already on your system, and carries update information, so
+     AppImageUpdate, Gear Lever or AppManager download only what changed.</p>
+  <p class="note">Run one of the two, not both: they use different data folders.</p>
+
+  <h2>License</h2>
+  <p>GPL-3.0-or-later. See the <a href="https://github.com/evandro777/FastApiClient">repository</a>.</p>
+</main>
+</body>
+</html>

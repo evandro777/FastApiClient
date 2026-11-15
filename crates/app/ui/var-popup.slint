@@ -1,0 +1,195 @@
+import { LineEdit, Palette } from "std-widgets.slint";
+import { Family } from "family.slint";
+
+// String work for `{{variable}}` autocomplete: Slint strings have no substring, so Rust does it (editor.rs).
+export global VarAssist {
+    // The names to offer at the byte offset `caret`: those matching an open `{{partial`; with none open, every name
+    // when `all` (Ctrl+Space) and nothing otherwise.
+    pure callback matches([string], string, int, bool) -> [string];
+    // The text with `{{name}}` replacing the open `{{partial` (or inserted at the caret), and the offset after it.
+    pure callback insert(string, int, string) -> string;
+    pure callback insert-caret(string, int, string) -> int;
+    // Where the last edit ended: a LineEdit does not tell where its cursor is.
+    pure callback caret(string, string) -> int;
+}
+
+// The suggestion list. It never takes the keyboard: the field keeps the focus and forwards its keys to `handle`.
+export component VarList inherits Rectangle {
+    in property <[string]> names;
+    out property <bool> open;
+    callback picked(string);
+    // The popup takes the keyboard when it opens; the field asks for it back here.
+    callback opened();
+    property <[string]> shown;
+    property <int> sel;
+    // The first visible row, so the picked one stays in view in a long list.
+    property <int> first: max(0, root.sel - 5);
+    property <int> rows: max(1, min(root.shown.length, 6));
+    // A zero-size anchor: the popup opens at its position.
+    width: 0px;
+    height: 0px;
+
+    // Opens the list for the text and caret, or closes it when there is nothing to offer.
+    public function update(text: string, caret: int, all: bool) {
+        root.shown = VarAssist.matches(root.names, text, caret, all);
+        root.sel = 0;
+        if root.shown.length > 0 || (all && root.names.length == 0) {
+            root.open = true;
+            pop.show();
+            root.opened();
+        } else {
+            root.dismiss();
+        }
+    }
+    public function dismiss() {
+        if root.open {
+            root.open = false;
+            pop.close();
+        }
+    }
+    // True when the key was used by the list.
+    public function handle(e: KeyEvent) -> bool {
+        if !root.open { return false; }
+        if e.text == Key.DownArrow { root.sel = min(root.sel + 1, root.shown.length - 1); return true; }
+        if e.text == Key.UpArrow { root.sel = max(root.sel - 1, 0); return true; }
+        if e.text == Key.Escape { root.dismiss(); return true; }
+        if e.text == Key.Return || e.text == Key.Tab {
+            if root.shown.length == 0 { root.dismiss(); return true; }
+            let name = root.shown[root.sel];
+            root.dismiss();
+            root.picked(name);
+            return true;
+        }
+        return false;
+    }
+
+    pop := PopupWindow {
+      close-policy: no-auto-close;
+      width: 260px;
+      height: root.rows * Family.control-height + 2px;
+      // The style's control background is translucent, so an opaque layer goes under it.
+      Rectangle { background: Palette.background; border-radius: Family.control-radius; }
+      Rectangle {
+        background: Palette.control-background;
+        border-radius: Family.control-radius;
+        border-width: 1px;
+        border-color: Palette.border;
+        clip: true;
+        if root.shown.length == 0: Text {
+            x: 10px;
+            width: parent.width - 20px;
+            text: @tr("No variables in the active environment");
+            color: Family.muted;
+            font-size: Family.body;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        for name[i] in root.shown: Rectangle {
+            y: 1px + (i - root.first) * Family.control-height;
+            x: 1px;
+            width: parent.width - 2px;
+            height: Family.control-height;
+            background: i == root.sel ? Family.selected : (ta.has-hover ? Palette.foreground.with-alpha(0.06) : transparent);
+            if i == root.sel: Rectangle { x: 0px; width: Family.selected-bar; background: Palette.accent-background; }
+            Text {
+                x: 10px;
+                width: parent.width - 20px;
+                text: name;
+                color: Palette.foreground;
+                font-size: Family.body;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            ta := TouchArea { clicked => { root.dismiss(); root.picked(name); } }
+        }
+      }
+    }
+}
+
+// A `LineEdit` with variable autocomplete: `{{` opens the list, Ctrl+Space lists every variable. Shortcut: Slint
+// does not expose a LineEdit's cursor, so it is taken to be where the last edit ended (the end of the text on
+// entering the field); Ctrl+Space after moving the cursor by hand inserts there. Upgrade when Slint adds it.
+export component VarLineEdit inherits Rectangle {
+    in-out property <string> text <=> le.text;
+    in property <string> placeholder-text <=> le.placeholder-text;
+    in property <InputType> input-type <=> le.input-type;
+    in property <[string]> var-names;
+    callback edited(string);
+    callback accepted(string);
+    // Opens the full list, for the snapshot script.
+    in property <bool> demo-open;
+    changed demo-open => { le.focus(); list.update(le.text, root.caret, true); }
+    property <int> caret: 2000000000;
+    property <string> last: le.text;
+    // The text before the last pick: setting the text from code bypasses the field's own undo, so Ctrl+Z right
+    // after a pick restores it here. Any edit or leaving the field forgets it.
+    property <string> undo-text;
+    property <bool> can-undo;
+    property <int> undo-caret;
+    min-width: le.min-width;
+    min-height: le.min-height;
+    preferred-width: le.preferred-width;
+    preferred-height: le.preferred-height;
+
+    function pick(name: string) {
+        root.undo-text = le.text;
+        root.can-undo = true;
+        let c = VarAssist.insert-caret(le.text, root.caret, name);
+        le.text = VarAssist.insert(le.text, root.caret, name);
+        root.last = le.text;
+        // Where the old text differs from the picked one is where the cursor was.
+        root.undo-caret = VarAssist.caret(le.text, root.undo-text);
+        root.caret = c;
+        le.set-selection-offsets(c, c);
+        root.edited(le.text);
+    }
+
+    le := LineEdit {
+        width: parent.width;
+        height: parent.height;
+        edited(t) => { root.edited(t); }
+        accepted(t) => { root.accepted(t); }
+        key-pressed(e) => {
+            if list.handle(e) { return accept; }
+            if root.can-undo && e.modifiers.control && !e.modifiers.shift && (e.text == "z" || e.text == "\u{1a}") {
+                root.can-undo = false;
+                le.text = root.undo-text;
+                root.last = le.text;
+                root.caret = root.undo-caret;
+                le.set-selection-offsets(root.undo-caret, root.undo-caret);
+                root.edited(le.text);
+                return accept;
+            }
+            if e.modifiers.control && e.text == " " {
+                list.update(self.text, root.caret, true);
+                return accept;
+            }
+            return reject;
+        }
+        // After the keystroke has changed the text, not before: `edited` runs first, `changed` once it has settled.
+        changed text => {
+            if self.has-focus && self.text != root.last {
+                root.can-undo = false;
+                root.caret = VarAssist.caret(root.last, self.text);
+                root.last = self.text;
+                list.update(self.text, root.caret, false);
+            }
+        }
+        changed has-focus => {
+            if self.has-focus {
+                root.last = self.text;
+                root.caret = 2000000000;
+            } else {
+                root.can-undo = false;
+                list.dismiss();
+            }
+        }
+    }
+    list := VarList {
+        x: 0px;
+        y: le.height;
+        names: root.var-names;
+        picked(name) => { root.pick(name); }
+        opened => { le.focus(); }
+    }
+}

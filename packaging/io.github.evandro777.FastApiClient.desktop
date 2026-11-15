@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=FastApiClient
+Type=Application
+GenericName=API Client
+Comment=Light and fast REST API client
+Keywords=REST;HTTP;API;
+Exec=fastapiclient
+Categories=Development;WebDevelopment;
+Icon=io.github.evandro777.FastApiClient
+Terminal=false
