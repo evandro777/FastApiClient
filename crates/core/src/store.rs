@@ -44,6 +44,7 @@ fn load_all_in(dir: &Path) -> Vec<Project> {
     // Projects hold tokens and passwords: a folder made by an older version (0755) is closed to other users now.
     let _ = create_private_dir(dir);
     let Ok(entries) = fs::read_dir(dir) else { return vec![] };
+    remove_dead_temp_files(dir);
     let mut out: Vec<Project> = entries
         .flatten()
         .map(|e| e.path())
@@ -58,6 +59,7 @@ fn load_all_in(dir: &Path) -> Vec<Project> {
                         .file_stem()
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_default();
+                    p.normalize_environments();
                     p
                 })
                 .and_then(|p| {
@@ -80,11 +82,29 @@ fn load_all_in(dir: &Path) -> Vec<Project> {
     out
 }
 
+/// `<name>.<pid>.tmp` is left by a process that died between write and rename; one whose process still runs is a
+/// write in progress and stays.
+fn remove_dead_temp_files(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for path in entries.flatten().map(|e| e.path()) {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let pid = name
+            .strip_suffix(".tmp")
+            .and_then(|n| n.rsplit('.').next()?.parse::<u32>().ok());
+        if pid.is_some_and(|pid| !Path::new(&format!("/proc/{pid}")).exists()) {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
 fn delete_in(dir: &Path, id: &str) -> io::Result<()> {
     if !valid_id(id) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid project id"));
     }
-    fs::remove_file(dir.join(format!("{id}.json")))
+    match fs::remove_file(dir.join(format!("{id}.json"))) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
 }
 
 #[cfg(test)]
@@ -106,7 +126,36 @@ mod tests {
         let names: Vec<_> = load_all_in(&dir).into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["Alpha", "beta"]);
         delete_in(&dir, &a.id).unwrap();
+        delete_in(&dir, &a.id).unwrap(); // Already absent is still deleted.
         assert_eq!(load_all_in(&dir).len(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn loaded_environment_names_are_repaired_without_changing_the_active_values() {
+        let dir = temp_dir();
+        let mut p = Project::new("Names");
+        p.environments = ["Shared", "Shared", ""]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| crate::model::Environment {
+                name: (*name).into(),
+                values: serde_json::json!({"id": i}),
+            })
+            .collect();
+        p.active_env = "Shared".into();
+        save_in(&dir, &p).unwrap();
+        let loaded = load_all_in(&dir);
+        assert_eq!(
+            loaded[0]
+                .environments
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Shared", "Shared 2", "3"]
+        );
+        assert_eq!(loaded[0].active_values()["id"], 0);
+        assert_eq!(loaded[0].environments.len(), 3);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -141,6 +190,19 @@ mod tests {
         let p = Project::new("secret");
         save_in(&dir, &p).unwrap();
         assert_eq!(mode(&dir.join(format!("{}.json", p.id))), 0o600);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn temp_files_of_dead_processes_are_removed_and_live_ones_kept() {
+        let dir = temp_dir();
+        let dead = dir.join("a.json.4294967294.tmp");
+        let live = dir.join(format!("b.json.{}.tmp", std::process::id()));
+        for f in [&dead, &live] {
+            fs::write(f, "x").unwrap();
+        }
+        load_all_in(&dir);
+        assert!(!dead.exists() && live.exists());
         fs::remove_dir_all(dir).unwrap();
     }
 

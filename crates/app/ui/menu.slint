@@ -14,9 +14,9 @@ component MenuCard inherits Rectangle {
     background: Family.scrim;
     init => { keys.focus(); }
 
-    // Swallows clicks so nothing behind the overlay is reachable; a click outside the card closes it.
-    TouchArea { clicked => { root.dismiss(); } }
+    // Escape must bubble from the card's controls; the backdrop belongs to the same scope.
     keys := FocusScope {
+        TouchArea { clicked => { root.dismiss(); } }
         key-pressed(event) => {
             if event.text == Key.Escape {
                 root.dismiss();
@@ -24,28 +24,28 @@ component MenuCard inherits Rectangle {
             }
             return reject;
         }
-    }
-    Rectangle {
-        width: min(root.card-width, parent.width - 32px);
-        height: box.preferred-height;
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        background: Palette.background;
-        border-radius: Family.radius;
-        border-width: 1px;
-        border-color: Palette.border;
-        TouchArea { }
-        box := VerticalBox {
-            alignment: start;
-            padding: 16px;
-            spacing: Family.gap-l;
-            Text { text: root.title; font-size: Family.page-title; font-weight: Family.page-weight; }
-            @children
-            HorizontalLayout {
-                spacing: Family.gap-m;
-                if root.has-about: Button { text: @tr("About"); clicked => { root.about(); } }
-                Rectangle { horizontal-stretch: 1; }
-                Button { text: @tr("Close"); primary: true; clicked => { root.dismiss(); } }
+        Rectangle {
+            width: min(root.card-width, parent.width - 32px);
+            height: box.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Palette.background;
+            border-radius: Family.radius;
+            border-width: 1px;
+            border-color: Palette.border;
+            TouchArea { }
+            box := VerticalBox {
+                alignment: start;
+                padding: 16px;
+                spacing: Family.gap-l;
+                Text { text: root.title; font-size: Family.page-title; font-weight: Family.page-weight; }
+                @children
+                HorizontalLayout {
+                    spacing: Family.gap-m;
+                    if root.has-about: Button { text: @tr("About"); clicked => { root.about(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button { text: @tr("Close"); primary: true; clicked => { root.dismiss(); } }
+                }
             }
         }
     }
@@ -82,11 +82,17 @@ export component MainMenu inherits MenuCard {
         }
     }
     PrefRow {
-        label: @tr("Beautify responses automatically");
+        label: @tr("Beautified responses by default");
         Switch {
             checked <=> root.auto-beautify;
             toggled => { root.toggled(); }
         }
+    }
+    Text {
+        text: @tr("Formats and highlights JSON/XML and decodes JSON Unicode escapes. Responses above 64 KiB start as Raw data; choose Beautified to process them manually.");
+        color: Family.muted;
+        wrap: word-wrap;
+        min-width: 0px;
     }
 }
 

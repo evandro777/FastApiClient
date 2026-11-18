@@ -26,21 +26,27 @@ pub fn backup_path(path: &Path) -> PathBuf {
 /// Reads and parses `path`. A missing file gives the default; one that cannot be read (bad UTF-8, permissions) or parsed
 /// is moved to `backup_path` and the default is used, so the next save never overwrites what the user wrote.
 /// The flag says the file was read and parsed (false for a missing or backed-up one).
-pub fn read_or_backup<T: Default>(path: &Path, parse: impl FnOnce(&str) -> Result<T, String>) -> (T, bool) {
+/// A failed backup is an error: callers must not save defaults over the original.
+pub fn read_or_backup<T: Default>(path: &Path, parse: impl FnOnce(&str) -> Result<T, String>) -> io::Result<(T, bool)> {
     let read = match fs::read_to_string(path) {
         Ok(text) => parse(&text).map(|v| (v, true)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return (T::default(), false),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((T::default(), false)),
         Err(e) => Err(e.to_string()),
     };
-    read.unwrap_or_else(|e| {
+    read.or_else(|e| {
         let bad = backup_path(path);
+        fs::rename(path, &bad).map_err(|backup| {
+            io::Error::new(
+                backup.kind(),
+                format!("cannot back up {} ({e}): {backup}", path.display()),
+            )
+        })?;
         eprintln!(
             "{} is invalid ({e}); kept as {}, using defaults",
             path.display(),
             bad.display()
         );
-        let _ = fs::rename(path, bad);
-        (T::default(), false)
+        Ok((T::default(), false))
     })
 }
 
@@ -60,7 +66,9 @@ pub fn write_private(path: &Path, data: impl AsRef<[u8]>) -> io::Result<()> {
         .mode(0o600)
         .open(path)?;
     file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    file.write_all(data.as_ref())
+    file.write_all(data.as_ref())?;
+    // Without it a rename can reach the disk before the data, and a power cut leaves an empty file.
+    file.sync_all()
 }
 
 /// Writes `data` to `path` through a private temp file and a rename, so a crash never leaves half a file. The folder
@@ -132,11 +140,15 @@ mod tests {
         let dir = temp_dir("bad");
         let file = dir.join("p.json");
         let parse = |t: &str| t.parse::<u32>().map_err(|e| e.to_string());
-        assert_eq!(read_or_backup(&file, parse), (0, false), "missing: default, no backup");
+        assert_eq!(
+            read_or_backup(&file, parse).unwrap(),
+            (0, false),
+            "missing: default, no backup"
+        );
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
         for text in ["first", "second"] {
             fs::write(&file, text).unwrap();
-            assert_eq!(read_or_backup(&file, parse), (0, false));
+            assert_eq!(read_or_backup(&file, parse).unwrap(), (0, false));
             assert!(!file.exists(), "moved aside, so the next save cannot overwrite it");
         }
         let mut kept: Vec<_> = fs::read_dir(&dir)
@@ -149,7 +161,24 @@ mod tests {
         let name = backup_path(Path::new("/x/p.json"));
         assert!(name.to_string_lossy().starts_with("/x/p.json.bad."));
         fs::write(&file, "7").unwrap();
-        assert_eq!(read_or_backup(&file, parse), (7, true), "a good file still loads");
+        assert_eq!(
+            read_or_backup(&file, parse).unwrap(),
+            (7, true),
+            "a good file still loads"
+        );
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_backup_returns_an_error_and_preserves_the_original() {
+        let dir = temp_dir("backup-failure");
+        // The source fits NAME_MAX, but adding a backup suffix does not.
+        let file = dir.join("x".repeat(250));
+        fs::write(&file, "original").unwrap();
+        let result = read_or_backup::<u32>(&file, |t| t.parse().map_err(|e: std::num::ParseIntError| e.to_string()));
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&file).unwrap(), "original");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

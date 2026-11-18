@@ -3,6 +3,122 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Language: pt_BR\n"
 
+msgctxt "Main"
+msgid "Format"
+msgstr "Formatar"
+
+msgctxt "Main"
+msgid "OK"
+msgstr "OK"
+
+msgctxt "Sidebar"
+msgid "Filter requests"
+msgstr "Filtrar requisições"
+
+msgctxt "Sidebar"
+msgid "No matching requests"
+msgstr "Nenhuma requisição encontrada"
+
+msgctxt "Main"
+msgid "Resize sidebar"
+msgstr "Redimensionar barra lateral"
+
+msgctxt "Main"
+msgid "Resize request and response"
+msgstr "Redimensionar requisição e resposta"
+
+msgctxt "CodeEdit"
+msgid "Cut"
+msgstr "Recortar"
+
+msgctxt "CodeEdit"
+msgid "Copy"
+msgstr "Copiar"
+
+msgctxt "CodeEdit"
+msgid "Paste"
+msgstr "Colar"
+
+msgctxt "CodeEdit"
+msgid "Select All"
+msgstr "Selecionar tudo"
+
+msgctxt "Tr"
+msgid "Checking…"
+msgstr "Verificando…"
+
+msgctxt "Tr"
+msgid "The request \"{}\" that this one needs did not return a complete JSON response."
+msgstr "A requisição \"{}\" necessária para esta não retornou uma resposta JSON completa."
+
+msgctxt "Tr"
+msgid "Response dependencies exceed the cache limit."
+msgstr "As dependências de resposta excedem o limite do cache."
+
+msgctxt "Tr"
+msgid "Not checked: payload exceeds 64 KiB."
+msgstr "Não verificado: o corpo excede 64 KiB."
+
+msgctxt "Tr"
+msgid "Import stopped: GLOBAL_HEADERS differ between environments. Use shared header templates with environment variables before importing."
+msgstr "Importação interrompida: GLOBAL_HEADERS difere entre ambientes. Use modelos de cabeçalhos compartilhados com variáveis de ambiente antes de importar."
+
+msgctxt "Main"
+msgid "Could not save project \"{}\": {}. Changes remain in memory; retrying automatically. Keep this window open until saving succeeds."
+msgstr "Não foi possível salvar o projeto \"{}\": {}. As alterações permanecem na memória; tentando novamente automaticamente. Mantenha esta janela aberta até salvar com sucesso."
+
+msgctxt "Main"
+msgid "Could not delete project \"{}\": {}. The project was kept; try deleting it again after fixing the error."
+msgstr "Não foi possível excluir o projeto \"{}\": {}. O projeto foi mantido; tente excluí-lo novamente após corrigir o erro."
+
+msgctxt "Tr"
+msgid "Not checked: payload contains template expressions."
+msgstr "Não verificado: o corpo contém expressões de modelo."
+
+msgctxt "Tr"
+msgid "Not checked: XML with a DTD is unsupported."
+msgstr "Não verificado: XML com DTD não é compatível."
+
+msgctxt "Tr"
+msgid "Unfinished JSON comment at line {}, column {}."
+msgstr "Comentário JSON não terminado na linha {}, coluna {}."
+
+msgctxt "Tr"
+msgid "Invalid JSON: unescaped line break ({}) at line {}, column {}. Check for a missing closing straight double quote (\")."
+msgstr "JSON inválido: quebra de linha sem escape ({}) na linha {}, coluna {}. Verifique se falta fechar as aspas duplas retas (\")."
+
+msgctxt "Tr"
+msgid "Invalid JSON: unescaped line break ({}) at line {}, column {}. The preceding curly quote cannot close a JSON string; use a straight double quote (\")."
+msgstr "JSON inválido: quebra de linha sem escape ({}) na linha {}, coluna {}. As aspas curvas anteriores não fecham uma string JSON; use aspas duplas retas (\")."
+
+msgctxt "Tr"
+msgid "Invalid JSON: unescaped tab ({}) at line {}, column {}."
+msgstr "JSON inválido: tabulação sem escape ({}) na linha {}, coluna {}."
+
+msgctxt "Tr"
+msgid "Invalid JSON: unescaped control character {} at line {}, column {}."
+msgstr "JSON inválido: caractere de controle sem escape {} na linha {}, coluna {}."
+
+msgctxt "Tr"
+msgid "Invalid JSON: unexpected {} at line {}, column {}. {}"
+msgstr "JSON inválido: {} inesperado na linha {}, coluna {}. {}"
+
+msgctxt "Tr"
+msgid "Valid JSON"
+msgstr "JSON válido"
+
+msgctxt "Tr"
+msgid "Invalid JSON: {}"
+msgstr "JSON inválido: {}"
+
+msgctxt "Tr"
+msgid "Valid XML"
+msgstr "XML válido"
+
+msgctxt "Tr"
+msgid "Invalid XML: {}"
+msgstr "XML inválido: {}"
+
 msgctxt "Tr"
 msgid "{} ms"
 msgstr "{} ms"
@@ -280,8 +396,24 @@ msgid "Response body"
 msgstr "Corpo da resposta"
 
 msgctxt "Main"
-msgid "Beautify"
-msgstr "Formatar"
+msgid "Raw data"
+msgstr "Dados brutos"
+
+msgctxt "Main"
+msgid "Beautified"
+msgstr "Formatado"
+
+msgctxt "Main"
+msgid "Beautifying…"
+msgstr "Formatando…"
+
+msgctxt "Main"
+msgid "Could not format this response. Showing original text with syntax colors."
+msgstr "Não foi possível formatar esta resposta. Exibindo o texto original com cores de sintaxe."
+
+msgctxt "Main"
+msgid "Beautified output exceeds 4 MiB. Showing Raw data."
+msgstr "A saída formatada excede 4 MiB. Exibindo dados brutos."
 
 msgctxt "Main"
 msgid "Request"
@@ -291,9 +423,13 @@ msgctxt "Main"
 msgid "Find"
 msgstr "Localizar"
 
-msgctxt "Main"
-msgid "Beautify responses automatically"
-msgstr "Formatar respostas automaticamente"
+msgctxt "MainMenu"
+msgid "Beautified responses by default"
+msgstr "Respostas formatadas por padrão"
+
+msgctxt "MainMenu"
+msgid "Formats and highlights JSON/XML and decodes JSON Unicode escapes. Responses above 64 KiB start as Raw data; choose Beautified to process them manually."
+msgstr "Formata e realça JSON/XML e decodifica escapes Unicode de JSON. Respostas acima de 64 KiB iniciam como dados brutos; escolha Formatado para processá-las manualmente."
 
 msgctxt "Main"
 msgid "Copy"
@@ -338,6 +474,14 @@ msgstr "Cabeçalhos e autenticação definidos aqui valem para todas as requisi�
 msgctxt "Main"
 msgid "Rename"
 msgstr "Renomear"
+
+msgctxt "Main"
+msgid "New folder"
+msgstr "Nova pasta"
+
+msgctxt "Main"
+msgid "New request"
+msgstr "Nova requisição"
 
 msgctxt "Main"
 msgid "Delete"
@@ -428,8 +572,8 @@ msgid "Include environment values and auth secrets"
 msgstr "Incluir valores dos ambientes e segredos de autenticação"
 
 msgctxt "Transfer"
-msgid "Without them the file is safe to share: environment keys stay, their values are emptied, and so are tokens and passwords."
-msgstr "Sem eles o arquivo é seguro para compartilhar: as chaves dos ambientes ficam, os valores são esvaziados, assim como tokens e senhas."
+msgid "Only environment values and Auth-tab secrets are removed. Headers, URLs, query parameters and bodies may still contain secrets. Review the file before sharing."
+msgstr "Somente os valores dos ambientes e os segredos da aba Autenticação são removidos. Cabeçalhos, URLs, parâmetros de consulta e corpos ainda podem conter segredos. Revise o arquivo antes de compartilhar."
 
 msgctxt "Transfer"
 msgid "Close"

@@ -29,6 +29,8 @@ pub enum ImportError {
     NotAProject,
     /// Written by a newer version; carries its format version.
     TooNew(u32),
+    /// Project headers cannot represent different GLOBAL_HEADERS for each imported environment.
+    EnvironmentHeaders,
 }
 
 /// Keeps the keys and the shape, drops every value: `{"host": "x", "db": {"port": 1}}` becomes
@@ -53,9 +55,7 @@ fn strip_secrets(auth: &mut Auth) {
     }
 }
 
-/// A copy that is safe to share: environment values are blanked (keys kept) and so are the secrets of every Auth
-/// setting. Shortcut: a secret typed by hand into a header such as `Authorization` is not recognised; look at the
-/// file before sending it on.
+/// Clears environment values and Auth secrets only. Headers, URLs, queries and bodies still need review.
 fn without_secrets(project: &Project) -> Project {
     let mut project = project.clone();
     for env in &mut project.environments {
@@ -76,7 +76,7 @@ fn write(envelope: &Envelope) -> String {
     serde_json::to_string_pretty(envelope).expect("a project always serialises")
 }
 
-/// With `include_values` false the file is safe to share, see `without_secrets`.
+/// With `include_values` false, removes environment values and Auth secrets only.
 pub fn export(project: &Project, include_values: bool) -> String {
     write(&Envelope {
         format: FORMAT.into(),
@@ -90,19 +90,6 @@ pub fn export(project: &Project, include_values: bool) -> String {
     })
 }
 
-/// Every project in one file; `import` reads it back.
-pub fn export_all(projects: &[Project], include_values: bool) -> String {
-    write(&Envelope {
-        format: FORMAT.into(),
-        version: VERSION,
-        project: None,
-        projects: projects
-            .iter()
-            .map(|p| if include_values { p.clone() } else { without_secrets(p) })
-            .collect(),
-    })
-}
-
 /// One project from a single-project file, all of them from an "export all" file. Each gets a fresh id, so importing
 /// never overwrites a project that is already open.
 pub fn import(text: &str) -> Result<Vec<Project>, ImportError> {
@@ -113,7 +100,7 @@ pub fn import(text: &str) -> Result<Vec<Project>, ImportError> {
             Err(_) => ImportError::Invalid(e.to_string()),
         }
     })?;
-    if envelope.format != FORMAT {
+    if envelope.format != FORMAT || envelope.version < SINGLE {
         return Err(ImportError::NotAProject);
     }
     if envelope.version > VERSION {
@@ -122,14 +109,18 @@ pub fn import(text: &str) -> Result<Vec<Project>, ImportError> {
     let projects = if envelope.version > SINGLE {
         envelope.projects
     } else {
-        vec![envelope.project.unwrap_or_default()]
+        vec![envelope.project.ok_or(ImportError::NotAProject)?]
     };
     if projects.is_empty() {
         return Err(ImportError::NotAProject);
     }
     Ok(projects
         .into_iter()
-        .map(|p| without_file_bodies(Project { id: new_id(), ..p }))
+        .map(|p| {
+            let mut p = without_file_bodies(Project { id: new_id(), ..p });
+            p.normalize_environments();
+            p
+        })
         .collect())
 }
 
@@ -151,6 +142,34 @@ mod tests {
 
     use super::*;
     use crate::model::{Basic, Environment, Folder, KeyValue, OAuth2, Request};
+
+    #[test]
+    fn native_envelopes_require_a_supported_version_and_project_payload() {
+        for file in [
+            r#"{"format":"fastapiclient-project","version":1}"#,
+            r#"{"format":"fastapiclient-project","version":1,"project":null}"#,
+            r#"{"format":"fastapiclient-project","version":0,"project":{}}"#,
+        ] {
+            assert_eq!(import(file), Err(ImportError::NotAProject));
+        }
+    }
+
+    #[test]
+    fn imported_environments_remain_independently_selectable() {
+        let file = r#"{"format":"fastapiclient-project","version":1,"project":{"active_env":"Shared","environments":[{"name":"Shared","values":{"host":"dev"}},{"name":"Shared","values":{"host":"prod"}},{"name":"","values":{"host":"blank"}}]}}"#;
+        let mut ws = crate::workspace::Workspace::new(import(file).unwrap());
+        assert_eq!(ws.projects[0].active_values()["host"], "dev");
+        ws.rename_env(1, "Production");
+        assert_eq!(ws.active_env_index(), Some(0));
+        assert_eq!(ws.projects[0].active_values()["host"], "dev");
+        ws.set_active_env(Some(1));
+        assert_eq!(ws.active_env_index(), Some(1));
+        assert_eq!(ws.projects[0].active_values()["host"], "prod");
+        ws.set_active_env(Some(2));
+        assert_eq!(ws.projects[0].active_values()["host"], "blank");
+        ws.set_active_env(None);
+        assert!(ws.projects[0].active_values().is_null());
+    }
 
     fn sample() -> Project {
         let mut p = Project::new("Shop");
@@ -230,6 +249,18 @@ mod tests {
     }
 
     #[test]
+    fn imported_api_keys_remain_literal_fields_that_need_review() {
+        let source = json!({"type": "collection.insomnia.rest/5.0", "collection": [
+            {"name": "API", "method": "GET", "url": "http://unused", "authentication": {
+                "type": "apikey", "key": "X-API-Key", "value": "literal-secret", "addTo": "header"}}
+        ]});
+        let project = crate::insomnia::import(&source.to_string()).unwrap();
+        let text = export(&project, false);
+        assert!(text.contains("literal-secret"));
+        assert_eq!(import(&text).unwrap()[0].requests[0].headers[0].value, "literal-secret");
+    }
+
+    #[test]
     fn imported_projects_lose_their_file_bodies_but_keep_the_rest() {
         let file = Request {
             name: "upload".into(),
@@ -269,17 +300,18 @@ mod tests {
     }
 
     #[test]
-    fn a_minimal_envelope_imports_as_an_empty_project() {
-        let p = import(&format!(r#"{{"format": "{FORMAT}", "version": 1}}"#))
+    fn an_explicit_empty_project_imports_with_defaults() {
+        let p = import(&format!(r#"{{"format": "{FORMAT}", "version": 1, "project": {{}}}}"#))
             .unwrap()
             .remove(0);
         assert!(p.requests.is_empty() && !p.id.is_empty());
     }
 
     #[test]
-    fn export_all_roundtrips_every_project_with_fresh_ids() {
+    fn legacy_multi_project_files_import_with_fresh_ids() {
         let (a, b) = (sample(), Project::new("Other"));
-        let back = import(&export_all(&[a.clone(), b.clone()], true)).unwrap();
+        let text = serde_json::json!({"format": FORMAT, "version": 2, "projects": [a, b]}).to_string();
+        let back = import(&text).unwrap();
         assert_eq!(back.len(), 2);
         assert!(back[0].id != a.id && back[1].id != b.id && back[0].id != back[1].id);
         assert_eq!(back[0].name, "Shop");
@@ -288,17 +320,10 @@ mod tests {
     }
 
     #[test]
-    fn export_all_without_values_blanks_every_project() {
-        let text = export_all(&[sample(), sample()], false);
-        for secret in ["api.shop.com", "project-token", "request-token", "hunter2", "shh"] {
-            assert!(!text.contains(secret), "{secret} leaked:\n{text}");
-        }
-    }
-
-    #[test]
     fn single_exports_stay_version_1_and_an_empty_all_file_is_refused() {
         assert!(export(&sample(), true).contains("\"version\": 1"));
         assert!(!export(&sample(), true).contains("\"projects\""));
-        assert_eq!(import(&export_all(&[], true)), Err(ImportError::NotAProject));
+        let empty = serde_json::json!({"format": FORMAT, "version": 2, "projects": []}).to_string();
+        assert_eq!(import(&empty), Err(ImportError::NotAProject));
     }
 }

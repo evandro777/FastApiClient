@@ -1,6 +1,6 @@
 import { Button, ComboBox, Palette, ScrollView } from "std-widgets.slint";
 import { Family } from "family.slint";
-import { GhostButton, MenuButton } from "controls.slint";
+import { GhostButton, MenuButton, SearchBox } from "controls.slint";
 
 // One line of the project tree. `project`, `folder` and `request` are indexes (-1 = none) that identify the node.
 export struct TreeRow {
@@ -45,7 +45,10 @@ component MenuEntry inherits Rectangle {
 }
 
 export component Sidebar inherits Rectangle {
+    in-out property <string> filter;
+    callback filter-edited();
     in property <[TreeRow]> rows;
+    in property <bool> preview-folder-menu: false;
     in property <bool> has-selection;
     // The tree below shows only the project picked here.
     in property <[string]> project-options;
@@ -159,12 +162,24 @@ export component Sidebar inherits Rectangle {
                 GhostButton { text: @tr("New folder"); plus: true; enabled: root.has-selection; clicked => { root.new-folder(); } }
                 GhostButton { text: @tr("New request"); plus: true; enabled: root.has-selection; clicked => { root.new-request(); } }
             }
+            SearchBox {
+                text <=> root.filter;
+                placeholder: @tr("Filter requests");
+                edited => { root.filter-edited(); }
+                key(event) => {
+                    if event.text == Key.UpArrow || event.text == Key.DownArrow {
+                        root.step(event.text == Key.UpArrow ? -1 : 1);
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
             if root.rows.length == 0 && root.project-options.length == 0: Text {
                 text: @tr("No projects yet. Open Manage and choose New project.");
                 wrap: word-wrap;
             }
             if root.rows.length == 0 && root.project-options.length > 0: Text {
-                text: @tr("Empty project. Add a folder or a request.");
+                text: root.filter != "" ? @tr("No matching requests") : @tr("Empty project. Add a folder or a request.");
                 wrap: word-wrap;
             }
             tree-scroll := ScrollView {
@@ -173,6 +188,8 @@ export component Sidebar inherits Rectangle {
                     alignment: start;
                     spacing: 2px;
                     for row in root.rows: Rectangle {
+                        property <bool> preview-menu: root.preview-folder-menu && row.kind == 1 && row.folder == 0;
+                        changed preview-menu => { if self.preview-menu { row-menu.show(); } }
                         height: 28px;
                         border-radius: 4px;
                         background: row.selected ? Family.selected : touch.has-hover ? Palette.foreground.with-alpha(0.06) : transparent;
@@ -200,7 +217,7 @@ export component Sidebar inherits Rectangle {
                             x: touch.mouse-x;
                             y: touch.mouse-y;
                             width: 150px;
-                            height: 66px;
+                            height: row.kind == 1 ? 130px : 66px;
                             Rectangle {
                                 background: Palette.background;
                                 border-color: Palette.border;
@@ -209,6 +226,14 @@ export component Sidebar inherits Rectangle {
                                 VerticalLayout {
                                     padding: 2px;
                                     spacing: 2px;
+                                    if row.kind == 1: MenuEntry {
+                                        label: @tr("New request");
+                                        activated => { root.new-request(); }
+                                    }
+                                    if row.kind == 1: MenuEntry {
+                                        label: @tr("New folder");
+                                        activated => { root.new-folder(); }
+                                    }
                                     MenuEntry { label: @tr("Rename (F2)"); activated => { root.rename(); } }
                                     MenuEntry { label: @tr("Delete"); activated => { root.delete(); } }
                                 }

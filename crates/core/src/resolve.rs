@@ -7,7 +7,8 @@ use serde_json::Value;
 use crate::model::{Auth, KeyValue};
 
 /// Merges header lists from the outermost parent to the request. A later entry replaces an earlier one with the same
-/// name (case-insensitive). A disabled entry is ignored, as in Insomnia: it neither sends nor cancels an inherited
+/// literal name (case-insensitive); template expressions keep their case until resolved. A disabled entry is ignored:
+/// as in Insomnia, it neither sends nor cancels an inherited
 /// header (imports are full of disabled rows that must not hide the project's).
 pub fn merge_headers(chain: &[&[KeyValue]]) -> Vec<KeyValue> {
     let mut out: Vec<KeyValue> = vec![];
@@ -16,7 +17,13 @@ pub fn merge_headers(chain: &[&[KeyValue]]) -> Vec<KeyValue> {
         .flat_map(|list| list.iter())
         .filter(|kv| kv.enabled && !kv.key.is_empty())
     {
-        out.retain(|e| !e.key.eq_ignore_ascii_case(&kv.key));
+        out.retain(|e| {
+            if e.key.contains("{{") || kv.key.contains("{{") {
+                e.key != kv.key
+            } else {
+                !e.key.eq_ignore_ascii_case(&kv.key)
+            }
+        });
         out.push(kv.clone());
     }
     out
@@ -68,7 +75,8 @@ pub fn names(env: &Value) -> Vec<String> {
 }
 
 /// Ready-made function expressions offered by autocomplete after the environment's variables.
-pub const FUNCTIONS: [&str; 5] = [
+pub const FUNCTIONS: [&str; 6] = [
+    "$prompt('Label', 'Description', 'Default value')",
     "$date",
     "$date | unix",
     "$date | format('%Y-%m-%d')",
@@ -80,21 +88,93 @@ pub const FUNCTIONS: [&str; 5] = [
 /// stays) or bare values, trimmed. `None` when `call` is not `name(...)`.
 pub(crate) fn args(call: &str, name: &str) -> Option<Vec<String>> {
     let inner = call.strip_prefix(name)?.trim().strip_prefix('(')?.strip_suffix(')')?;
-    let (mut out, mut cur, mut quote) = (vec![], String::new(), None);
-    for c in inner.chars() {
-        match (c, quote) {
-            ('\'' | '"', None) => quote = Some(c),
-            (q, Some(open)) if q == open => quote = None,
-            (',', None) => out.push(std::mem::take(&mut cur)),
-            (c, Some(_)) => cur.push(c),
-            (c, None) if !c.is_whitespace() => cur.push(c),
-            _ => {}
+    Some(
+        arguments(inner)?
+            .into_iter()
+            .map(|(value, quoted)| {
+                if quoted {
+                    value
+                } else {
+                    value.chars().filter(|c| !c.is_whitespace()).collect()
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Parse literal arguments, retaining whether each was quoted so import and prompts can reject dynamic values.
+pub(crate) fn arguments(inner: &str) -> Option<Vec<(String, bool)>> {
+    let mut chars = inner.chars().peekable();
+    let mut out = vec![];
+    loop {
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+        let quote = chars.peek().copied().filter(|c| matches!(c, '\'' | '"'));
+        let mut value = String::new();
+        if let Some(quote) = quote {
+            chars.next();
+            loop {
+                match chars.next()? {
+                    c if c == quote => break,
+                    '\\' => {
+                        let c = chars.next()?;
+                        if c != quote && c != '\\' {
+                            value.push('\\');
+                        }
+                        value.push(c);
+                    }
+                    c => value.push(c),
+                }
+            }
+            while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                chars.next();
+            }
+            if chars.peek().is_some_and(|c| *c != ',') {
+                return None;
+            }
+        } else {
+            while chars.peek().is_some_and(|c| *c != ',') {
+                let c = chars.next()?;
+                if matches!(c, '\'' | '"') {
+                    return None;
+                }
+                value.push(c);
+            }
+            value = value.trim().into();
+        }
+        out.push((value, quote.is_some()));
+        if chars.next().is_none() {
+            return Some(out);
         }
     }
-    (quote.is_none()).then(|| {
-        out.push(cur);
-        out
-    })
+}
+
+/// A Send-time question. Answers are keyed by this entire tuple for one Send only.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct Prompt {
+    pub label: String,
+    pub description: String,
+    pub default: String,
+}
+
+impl Prompt {
+    pub fn parse(expr: &str) -> Option<Self> {
+        let inner = expr
+            .strip_prefix("$prompt")?
+            .trim()
+            .strip_prefix('(')?
+            .strip_suffix(')')?;
+        let a = arguments(inner)?;
+        if !(1..=3).contains(&a.len()) || a.iter().any(|(_, quoted)| !quoted) || a[0].0.trim().is_empty() {
+            return None;
+        }
+        Some(Self {
+            label: a[0].0.clone(),
+            description: a.get(1).map(|a| a.0.clone()).unwrap_or_default(),
+            default: a.get(2).map(|a| a.0.clone()).unwrap_or_default(),
+        })
+    }
 }
 
 /// The one argument of `name(...)`.
@@ -172,12 +252,39 @@ pub fn substitute(text: &str, env: &Value) -> (String, Vec<String>) {
     substitute_with(text, env, &mut |name| date_expr(name, now))
 }
 
+/// End of an expression, excluding delimiters inside a function's quoted arguments.
+pub(crate) fn expression_end(text: &str) -> Option<usize> {
+    if !text.trim_start().starts_with('$') {
+        return text.find("}}");
+    }
+    let (mut quote, mut escaped) = (None, false);
+    for (i, ch) in text.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if quote.is_some() && ch == '\\' {
+            escaped = true;
+        } else if quote == Some(ch) {
+            quote = None;
+        } else if quote.is_none() {
+            if text[i..].starts_with("}}") {
+                return Some(i);
+            }
+            if matches!(ch, '\'' | '"') {
+                quote = Some(ch);
+            }
+        }
+    }
+    None
+}
+
 /// `substitute` with `$function` names (`$date`, `$response(...)`) evaluated by `func`.
 pub fn substitute_with(text: &str, env: &Value, func: &mut dyn FnMut(&str) -> Option<String>) -> (String, Vec<String>) {
     let (mut out, mut missing) = (String::with_capacity(text.len()), vec![]);
     let mut rest = text;
     while let Some(start) = rest.find("{{") {
-        let Some(len) = rest[start + 2..].find("}}") else { break };
+        let Some(len) = expression_end(&rest[start + 2..]) else {
+            break;
+        };
         let name = rest[start + 2..start + 2 + len].trim();
         out.push_str(&rest[..start]);
         let value = if name.starts_with('$') {
@@ -205,6 +312,20 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn quoted_template_delimiters_are_literal() {
+        for default in [r#"{"a":{}}"#, "}}", "{{host}}", "猫 \\ ' }}"] {
+            let escaped = default.replace('\\', "\\\\").replace('\'', "\\'");
+            let source = format!("before {{{{ $prompt('Payload', '', '{escaped}') }}}} after");
+            let (result, missing) =
+                substitute_with(&source, &json!({}), &mut |call| Some(Prompt::parse(call)?.default));
+            assert_eq!(result, format!("before {default} after"));
+            assert!(missing.is_empty());
+        }
+        let incomplete = "{{ $prompt('x', '', '}}')";
+        assert_eq!(substitute(incomplete, &json!({})), (incomplete.into(), vec![]));
+    }
 
     fn kv(k: &str, v: &str, enabled: bool) -> KeyValue {
         KeyValue {
@@ -322,6 +443,34 @@ mod tests {
         assert_eq!(args("add('-1 day')", "add").unwrap(), ["-1 day"]);
         assert_eq!(args("add('x", "add"), None);
         assert_eq!(args("unix", "add"), None);
+    }
+
+    #[test]
+    fn prompts_require_one_to_three_literal_strings() {
+        let p = Prompt::parse(r#"$prompt('猫, café', 'Say \'yes\'', 'C:\\tmp')"#).unwrap();
+        assert_eq!(
+            (p.label.as_str(), p.description.as_str(), p.default.as_str()),
+            ("猫, café", "Say 'yes'", r"C:\tmp")
+        );
+        let p = Prompt::parse("$prompt(\"Label\")").unwrap();
+        assert_eq!((p.description, p.default), (String::new(), String::new()));
+        assert_eq!(Prompt::parse("$prompt('Label', '')").unwrap().description, "");
+        for bad in [
+            "$prompt()",
+            "$prompt(' ')",
+            "$prompt(name)",
+            "$prompt('x', 1)",
+            "$prompt('x',)",
+            "$prompt('x','y','z','extra')",
+            "$prompt('unterminated)",
+            "$prompt('x' + 'y')",
+        ] {
+            assert!(Prompt::parse(bad).is_none(), "{bad}");
+        }
+        assert_eq!(
+            args(r#"$response('A\'s, B', '$.x', 3600)"#, "$response").unwrap(),
+            ["A's, B", "$.x", "3600"]
+        );
     }
 
     #[test]

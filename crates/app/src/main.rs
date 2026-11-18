@@ -1,6 +1,6 @@
 use fastapiclient_core::{
     chain::{self, Responses},
-    http::{self, Error, Response, pretty_json, pretty_xml},
+    http::{self, Error, Response},
     model::{Body, EnvError, Environment, Folder, Project},
     settings::Settings,
     store,
@@ -9,6 +9,7 @@ use fastapiclient_core::{
 use slint::{Model, ModelRc, SharedString, VecModel};
 use std::{
     cell::RefCell,
+    collections::HashSet,
     rc::Rc,
     sync::{
         Arc,
@@ -19,10 +20,16 @@ use std::{
 
 slint::include_modules!();
 
+#[cfg(test)]
+mod app_tests;
 mod editor;
 mod fixtures;
+mod highlight;
 mod instance;
+mod payload;
+mod sending;
 mod transfer;
+mod validation;
 
 use editor::{Methods, ensure_blank};
 
@@ -33,6 +40,7 @@ struct App {
     ws: Workspace,
     /// False with fixtures, so a snapshot run never writes to the real data directory.
     persist: bool,
+    dirty: HashSet<String>,
 }
 
 /// Everything the callbacks share. Cloning is cheap: it only clones the handles.
@@ -48,6 +56,7 @@ struct Ctx {
     generation: Arc<AtomicU64>,
     /// Responses that `{{ $response(...) }}` reads, shared with the sending threads.
     responses: Arc<Responses>,
+    dialogs: Arc<sending::Dialogs>,
 }
 
 fn main() {
@@ -67,8 +76,14 @@ fn main() {
         .select()
         .expect("cannot start the Slint software renderer");
 
-    let settings = Settings::load();
+    let settings = Settings::load().unwrap_or_else(|e| {
+        eprintln!("cannot load settings safely: {e}");
+        std::process::exit(1);
+    });
     let fixture_mode = fixtures::mode();
+    if !fixture_run {
+        remove_old_responses();
+    }
     let (ws, persist) = match fixture_mode {
         // With fixtures nothing is read, saved or sent, so the real system is never touched.
         Some(mode) => (fixtures::workspace(mode), false),
@@ -86,18 +101,27 @@ fn main() {
         }
     }
     ui.set_auto_beautify(settings.auto_beautify);
-    ui.set_response_beautify(settings.auto_beautify);
+    ui.set_sidebar_width(settings.sidebar_width);
+    ui.set_request_split(settings.request_split);
     ui.set_color_scheme_index(theme_index(&settings.theme));
+    if fixture_run && let Ok(theme) = std::env::var("FASTAPICLIENT_THEME") {
+        ui.set_color_scheme_index(theme_index(&theme));
+    }
     ui.set_language_index(LANGUAGES.iter().position(|l| *l == settings.language).unwrap_or(0) as i32);
     // One model per table for the whole run: the callbacks must all push into the same ones.
     let c = Ctx {
-        app: Rc::new(RefCell::new(App { ws, persist })),
+        app: Rc::new(RefCell::new(App {
+            ws,
+            persist,
+            dirty: HashSet::new(),
+        })),
         tables: std::array::from_fn(|_| Rc::new(VecModel::default())),
         methods: Rc::new(VecModel::default()),
         tree: Rc::new(VecModel::default()),
         export_rows: Rc::new(VecModel::default()),
         generation: Arc::new(AtomicU64::new(0)),
         responses: Arc::default(),
+        dialogs: Arc::default(),
     };
     ui.set_tree_rows(c.tree.clone().into());
     ui.set_export_rows(c.export_rows.clone().into());
@@ -108,6 +132,7 @@ fn main() {
     // Only fails when no translation matches; the source strings are English anyway.
     let _ = slint::select_bundled_translation(&language(&settings));
     wire(&ui, &c, settings);
+    highlight::wire(&ui);
 
     refresh(&ui, &c, true);
     if let Some(mode) = fixture_mode {
@@ -118,6 +143,67 @@ fn main() {
     match std::env::var("FASTAPICLIENT_PAGE").as_deref() {
         Ok("about") => ui.set_about_open(true),
         Ok("menu") => ui.set_menu_open(true),
+        Ok("save-error") if fixture_run => {
+            ui.set_save_project("Payments".into());
+            ui.set_save_error("Permission denied (os error 13)".into());
+        }
+        Ok("cache-limit") if fixture_run => {
+            let weak = ui.as_weak();
+            slint::Timer::single_shot(Duration::from_millis(200), move || {
+                let ui = weak.unwrap();
+                highlight::clear_response(&ui);
+                show_error(&ui, Error::CacheLimit);
+            });
+        }
+        Ok("delete-error") if fixture_run => {
+            let weak = ui.as_weak();
+            // The initial selection reload clears errors before the first frame.
+            slint::Timer::single_shot(Duration::from_millis(200), move || {
+                let ui = weak.unwrap();
+                ui.set_failed_delete_project("Payments".into());
+                ui.set_delete_error("Permission denied (os error 13)".into());
+            });
+        }
+        Ok("response-xml") if fixture_run && ui.get_has_response() => {
+            ui.set_search_open(false);
+            ui.set_auto_beautify(true);
+            let text = "<root><name> Ana </name><blank> </blank></root>";
+            ui.set_truncated(false);
+            ui.set_size_bytes(text.len() as i32);
+            highlight::response(&ui, text, "application/xml");
+        }
+        Ok("filter" | "filter-none") if fixture_run => {
+            ui.set_request_filter(
+                if std::env::var("FASTAPICLIENT_PAGE").as_deref() == Ok("filter") {
+                    "us"
+                } else {
+                    "no-such-request"
+                }
+                .into(),
+            );
+            refresh(&ui, &c, false);
+        }
+        Ok("prompt") if fixture_run => fixtures::prompt(&ui),
+        Ok("new-folder") if fixture_run => ui.invoke_ask_create(true),
+        Ok("new-request") if fixture_run => ui.invoke_ask_create(false),
+        Ok("folder-menu") if fixture_run => {
+            let weak = ui.as_weak();
+            slint::Timer::single_shot(Duration::from_millis(200), move || {
+                let ui = weak.unwrap();
+                ui.invoke_select(0, 0, -1);
+                ui.set_preview_folder_menu(true);
+            });
+        }
+        Ok("response-raw") if fixture_run => {
+            ui.set_response_mode(0);
+            ui.invoke_response_view(false);
+        }
+        Ok("response-normal") if fixture_run => ui.set_search_open(false),
+        Ok("response-find") if fixture_run => ui.set_search_open(true),
+        Ok("response-notice") if fixture_run && ui.get_has_response() => {
+            ui.set_search_open(false);
+            highlight::response(&ui, "{\"unfinished\":", "application/json");
+        }
         // The list needs a shown window, so it opens a moment after the first frame.
         Ok("vars") => {
             let weak = ui.as_weak();
@@ -126,6 +212,12 @@ fn main() {
             });
         }
         Ok("manage") => ui.set_manage_open(true),
+        Ok(
+            page @ ("validation-json" | "validation-xml" | "validation-dtd" | "payload-errors" | "payload-lines"
+            | "payload-empty" | "highlight-json" | "highlight-xml" | "highlight-limit" | "validation-limit"),
+        ) if fixture_run => {
+            fixtures::payload(&ui, fixture_mode.unwrap_or(0), page);
+        }
         // Canned text only: the real dialog is opened by Send on a request with a file body.
         Ok("sendfile") => {
             ui.set_send_file_path("/home/user/Documents/report.pdf".into());
@@ -140,7 +232,7 @@ fn main() {
                 fixtures::env_error(&ui);
             }
         }
-        Ok(p @ ("export" | "import" | "insomnia")) => {
+        Ok(p @ ("export" | "import" | "insomnia" | "import-headers")) => {
             // 0 export, 1 import, 2 import with the Insomnia format picked.
             let dialog = match p {
                 "export" => 0,
@@ -152,6 +244,9 @@ fn main() {
             ui.set_transfer_open(true);
             if let Some(mode) = fixture_mode {
                 fixtures::transfer(&ui, mode, dialog);
+            }
+            if p == "import-headers" {
+                ui.set_transfer_kind(16);
             }
         }
         Ok(p) => ui.set_tab(p.parse().unwrap_or(0)),
@@ -190,23 +285,73 @@ fn load_workspace(settings: &Settings) -> Workspace {
     ws
 }
 
-fn save(project: &Project) {
-    if let Err(e) = store::save(project) {
-        eprintln!("cannot save project {}: {e}", project.name);
+fn retry_saves(ui: &Main, app: &mut App, mut write: impl FnMut(&Project) -> std::io::Result<()>) -> bool {
+    if app.dirty.is_empty() {
+        return true;
     }
+    let mut error = None;
+    app.dirty.retain(|id| {
+        let Some(project) = app.ws.projects.iter().find(|p| &p.id == id) else {
+            return false;
+        };
+        match write(project) {
+            Ok(()) => false,
+            Err(e) => {
+                error.get_or_insert_with(|| (project.name.clone(), e.to_string()));
+                true
+            }
+        }
+    });
+    let (project, detail) = error.unwrap_or_default();
+    ui.set_save_project(project.into());
+    ui.set_save_error(detail.into());
+    app.dirty.is_empty()
+}
+
+fn save(ui: &Main, app: &mut App, project: usize) -> bool {
+    if app.persist {
+        app.dirty.insert(app.ws.projects[project].id.clone());
+    }
+    retry_saves(ui, app, store::save)
 }
 
 /// Copies the editor into the selected node and saves its project if that changed anything.
 fn flush(ui: &Main, c: &Ctx) {
     let mut app = c.app.borrow_mut();
-    let App { ws, persist } = &mut *app;
-    let Some(sel) = ws.sel else { return };
-    let changed = ws
+    let selected = app.ws.sel;
+    let changed = app
+        .ws
         .current()
         .is_some_and(|node| editor::store(ui, &c.tables, &c.methods, node));
-    if changed && *persist {
-        save(&ws.projects[sel.project]);
+    if changed
+        && app.persist
+        && let Some(sel) = selected
+    {
+        let id = app.ws.projects[sel.project].id.clone();
+        app.dirty.insert(id);
     }
+    retry_saves(ui, &mut app, store::save);
+}
+
+/// Keep the selection and its draft intact unless the saved project has actually gone.
+fn delete_project(ui: &Main, app: &mut App, c: &Ctx) -> bool {
+    let Some(selected) = app.ws.sel else { return false };
+    let project = &app.ws.projects[selected.project];
+    if app.persist
+        && let Err(e) = store::delete(&project.id)
+    {
+        ui.set_failed_delete_project(project.name.clone().into());
+        ui.set_delete_error(e.to_string().into());
+        return false;
+    }
+    c.generation.fetch_add(1, Ordering::SeqCst);
+    c.dialogs.cancel();
+    c.responses.remove_project(&project.id);
+    app.dirty.remove(&project.id);
+    app.ws.select_project(selected.project);
+    app.ws.delete();
+    ui.set_delete_error("".into());
+    true
 }
 
 fn kind_number(k: Kind) -> i32 {
@@ -225,9 +370,19 @@ fn index(i: Option<usize>) -> i32 {
 /// forgets the last response (it belonged to another request).
 fn refresh(ui: &Main, c: &Ctx, reload: bool) {
     let mut app = c.app.borrow_mut();
+    let project_id = app
+        .ws
+        .sel
+        .and_then(|s| app.ws.projects.get(s.project))
+        .map(|p| p.id.as_str())
+        .unwrap_or("");
+    if project_id != ui.get_filter_project_id().as_str() {
+        ui.set_request_filter("".into());
+        ui.set_filter_project_id(project_id.into());
+    }
     let rows: Vec<TreeRow> = app
         .ws
-        .tree()
+        .filtered_tree(&ui.get_request_filter())
         .into_iter()
         .map(|t| TreeRow {
             text: t.text.into(),
@@ -244,6 +399,7 @@ fn refresh(ui: &Main, c: &Ctx, reload: bool) {
     ui.set_selected_kind(kind);
     ui.set_selected_name(app.ws.name().unwrap_or("").into());
     if reload {
+        ui.set_delete_error("".into());
         // Whatever was opened starts on its first tab: Params for a request, Auth for a folder or project (the
         // only tabs they have are Headers and Auth). A request without params but with a body opens on Body.
         let mut tab = if kind == 2 { 0 } else { 3 };
@@ -257,13 +413,7 @@ fn refresh(ui: &Main, c: &Ctx, reload: bool) {
             editor::load(ui, &c.tables, &c.methods, node);
         }
         ui.set_tab(tab);
-        c.generation.fetch_add(1, Ordering::SeqCst);
-        ui.set_sending(false);
-        ui.set_has_response(false);
-        ui.set_request_log("".into());
-        ui.set_error_kind(-1);
-        ui.set_warning_vars("".into());
-        ui.set_truncated(false);
+        reset_send(ui, c);
     }
     refresh_envs(ui, &app.ws);
     ui.set_project_options(list(app.ws.project_names()));
@@ -337,22 +487,37 @@ fn guess_ext(text: &str) -> &'static str {
     let lower: String = t.chars().take(64).collect::<String>().to_ascii_lowercase();
     if t.starts_with(['{', '[']) {
         "json"
-    } else if lower.starts_with("<!doctype html") || lower.starts_with("<html") {
-        "html"
-    } else if t.starts_with('<') {
+    } else if t.starts_with('<') && !lower.starts_with("<!doctype html") && !lower.starts_with("<html") {
         "xml"
     } else {
         "txt"
     }
 }
 
-/// One fixed file under the cache dir (not /tmp, which a Flatpak sandbox does not share with the host), overwritten each time.
-fn open_external(text: &str) -> std::io::Result<()> {
+/// Under the cache dir, not /tmp, which a Flatpak sandbox does not share with the host.
+fn response_dir() -> std::io::Result<std::path::PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))
         .ok_or_else(|| std::io::Error::other("no cache directory"))?;
-    let dir = base.join("FastApiClient");
+    Ok(base.join("FastApiClient"))
+}
+
+/// A response can hold a token: the copy opened in an external editor does not outlive the next start.
+fn remove_old_responses() {
+    let Ok(entries) = response_dir().and_then(std::fs::read_dir) else {
+        return;
+    };
+    for path in entries.flatten().map(|e| e.path()) {
+        if path.file_stem().is_some_and(|s| s == "response") {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// One fixed file there, overwritten each time.
+fn open_external(text: &str) -> std::io::Result<()> {
+    let dir = response_dir()?;
     // A response can hold a token, so the file is private like the projects.
     fastapiclient_core::files::create_private_dir(&dir)?;
     let file = dir.join(format!("response.{}", guess_ext(text)));
@@ -369,21 +534,42 @@ fn open_envs(ui: &Main, c: &Ctx) {
     load_env_text(ui, &app.ws);
 }
 
-/// Runs an environment edit on the workspace (it gets the index being edited), saves the project it reports and
-/// refreshes the lists.
+fn reset_send(ui: &Main, c: &Ctx) {
+    c.generation.fetch_add(1, Ordering::SeqCst);
+    c.dialogs.cancel();
+    if matches!(ui.get_prompt_kind(), 8 | 9) {
+        ui.set_prompt_open(false);
+    }
+    ui.set_sending(false);
+    highlight::clear_response(ui);
+    ui.set_request_log("".into());
+    ui.set_error_kind(-1);
+    ui.set_warning_vars("".into());
+    ui.set_truncated(false);
+}
+
+/// Refresh environment lists without reloading the request's unsaved editor values.
 fn env_op(ui: &Main, c: &Ctx, op: impl FnOnce(&mut Workspace, usize) -> Option<usize>) {
     let edit = ui.get_env_edit_index().max(0) as usize;
-    {
+    let changed = {
         let mut app = c.app.borrow_mut();
-        if let Some(i) = op(&mut app.ws, edit).filter(|_| app.persist) {
-            save(&app.ws.projects[i]);
+        let project = op(&mut app.ws, edit);
+        if let Some(i) = project.filter(|_| app.persist) {
+            save(ui, &mut app, i);
         }
+        project.is_some()
+    };
+    if changed {
+        reset_send(ui, c);
     }
     refresh_envs(ui, &c.app.borrow().ws);
 }
 
 fn wire(ui: &Main, c: &Ctx, settings: Settings) {
-    let default_name = |ui: &Main, kind: i32| ui.global::<Tr>().invoke_default_name(kind).to_string();
+    ui.on_filter_edited({
+        let (weak, c) = (ui.as_weak(), c.clone());
+        move || refresh(&weak.unwrap(), &c, false)
+    });
 
     ui.on_select({
         let (weak, c) = (ui.as_weak(), c.clone());
@@ -410,7 +596,7 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
             let ui = weak.unwrap();
             let target = {
                 let app = c.app.borrow();
-                let tree = app.ws.tree();
+                let tree = app.ws.filtered_tree(&ui.get_request_filter());
                 match tree.iter().position(|t| t.selected) {
                     // With the project itself open (no row highlighted), Down goes to the first row.
                     None => tree.first().filter(|_| delta > 0).map(|t| t.sel),
@@ -436,6 +622,7 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
             }
             flush(&ui, &c);
             if c.app.borrow_mut().ws.select_project(index.max(0) as usize) {
+                ui.set_request_filter("".into());
                 refresh(&ui, &c, true);
             }
         }
@@ -454,7 +641,7 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
                 let mut app = c.app.borrow_mut();
                 let i = app.ws.add_project(name);
                 if app.persist {
-                    save(&app.ws.projects[i]);
+                    save(&ui, &mut app, i);
                 }
             }
             refresh(&ui, &c, true);
@@ -462,14 +649,17 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
     });
     ui.on_new_folder({
         let (weak, c) = (ui.as_weak(), c.clone());
-        move || {
+        move |name| {
+            let name = name.trim();
+            if name.is_empty() {
+                return;
+            }
             let ui = weak.unwrap();
             flush(&ui, &c);
-            let name = default_name(&ui, 1);
             {
                 let mut app = c.app.borrow_mut();
-                if let Some(i) = app.ws.add_folder(&name).filter(|_| app.persist) {
-                    save(&app.ws.projects[i]);
+                if let Some(i) = app.ws.add_folder(name).filter(|_| app.persist) {
+                    save(&ui, &mut app, i);
                 }
             }
             refresh(&ui, &c, true);
@@ -477,14 +667,17 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
     });
     ui.on_new_request({
         let (weak, c) = (ui.as_weak(), c.clone());
-        move || {
+        move |name| {
+            let name = name.trim();
+            if name.is_empty() {
+                return;
+            }
             let ui = weak.unwrap();
             flush(&ui, &c);
-            let name = default_name(&ui, 2);
             {
                 let mut app = c.app.borrow_mut();
-                if let Some(i) = app.ws.add_request(&name).filter(|_| app.persist) {
-                    save(&app.ws.projects[i]);
+                if let Some(i) = app.ws.add_request(name).filter(|_| app.persist) {
+                    save(&ui, &mut app, i);
                 }
             }
             refresh(&ui, &c, true);
@@ -498,7 +691,7 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
             {
                 let mut app = c.app.borrow_mut();
                 if let Some(i) = app.ws.rename(&name).filter(|_| app.persist) {
-                    save(&app.ws.projects[i]);
+                    save(&ui, &mut app, i);
                 }
             }
             refresh(&ui, &c, false);
@@ -511,7 +704,7 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
             {
                 let mut app = c.app.borrow_mut();
                 if let Some(i) = app.ws.rename_project(&name).filter(|_| app.persist) {
-                    save(&app.ws.projects[i]);
+                    save(&ui, &mut app, i);
                 }
             }
             refresh(&ui, &c, false);
@@ -524,16 +717,8 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
             // No flush: the editor holds a node of the project that is about to disappear.
             {
                 let mut app = c.app.borrow_mut();
-                let project = app.ws.sel.map(|s| s.project);
-                // `delete` works on the selection, so the project itself is selected first.
-                let deleted = project
-                    .filter(|p| app.ws.select_project(*p))
-                    .and_then(|_| app.ws.delete());
-                if let Some(Deleted::Project(id)) = deleted
-                    && app.persist
-                    && let Err(e) = store::delete(&id)
-                {
-                    eprintln!("cannot delete project {id}: {e}");
+                if !delete_project(&ui, &mut app, &c) {
+                    return;
                 }
             }
             refresh(&ui, &c, true);
@@ -560,14 +745,14 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
             // No flush: the editor holds the node that is about to disappear.
             {
                 let mut app = c.app.borrow_mut();
-                match app.ws.delete() {
-                    Some(Deleted::Project(id)) if app.persist => {
-                        if let Err(e) = store::delete(&id) {
-                            eprintln!("cannot delete project {id}: {e}");
-                        }
+                if app.ws.sel.is_some_and(|s| s.kind() == Kind::Project) {
+                    if !delete_project(&ui, &mut app, &c) {
+                        return;
                     }
-                    Some(Deleted::Part(i)) if app.persist => save(&app.ws.projects[i]),
-                    _ => {}
+                } else if let Some(Deleted::Part(i)) = app.ws.delete()
+                    && app.persist
+                {
+                    save(&ui, &mut app, i);
                 }
             }
             refresh(&ui, &c, true);
@@ -611,16 +796,9 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
             let ui = weak.unwrap();
             match Environment::parse(&text) {
                 Ok(values) => {
-                    let edit = ui.get_env_edit_index().max(0) as usize;
-                    {
-                        let mut app = c.app.borrow_mut();
-                        if let Some(i) = app.ws.set_env_values(edit, values).filter(|_| app.persist) {
-                            save(&app.ws.projects[i]);
-                        }
-                    }
+                    env_op(&ui, &c, |ws, edit| ws.set_env_values(edit, values));
                     // Shows the saved value re-indented, and clears the error and the unsaved mark.
                     load_env_text(&ui, &c.app.borrow().ws);
-                    set_var_names(&ui, &c.app.borrow().ws);
                 }
                 Err(e) => show_env_error(&ui, e),
             }
@@ -649,8 +827,44 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
         }
     });
     let code_editing = ui.global::<CodeEditing>();
-    code_editing.on_indent(|text, start, end| editor::indent(&text, start.max(0) as usize, end.max(0) as usize).into());
-    code_editing.on_indent_width(|| editor::INDENT.len() as i32);
+    // The software renderer treats "monospace" as a literal name; resolve the system's generic family first.
+    let mut fonts = slint::fontique_011::shared_collection();
+    let mono = fonts
+        .generic_families(slint::fontique_011::fontique::GenericFamily::Monospace)
+        .next();
+    if let Some(family) = mono {
+        code_editing.set_monospace_family(fonts.family_name(family).unwrap_or("DejaVu Sans Mono").into());
+    }
+    code_editing.on_indent(|text, anchor, caret, unindent| {
+        editor::indent(&text, anchor.max(0) as usize, caret.max(0) as usize, unindent)
+    });
+    code_editing.on_enter(|text, anchor, caret, kind| {
+        editor::enter(&text, anchor.max(0) as usize, caret.max(0) as usize, kind)
+    });
+    code_editing.on_format(|text, kind| payload::format(&text, kind).into());
+    code_editing.on_line_numbers(|text| editor::line_numbers(&text).into());
+    code_editing.on_selection_safe({
+        let weak = ui.as_weak();
+        // Selection offsets also invalidate the binding after a move to a different monitor.
+        move |width, _, _| {
+            weak.upgrade()
+                .is_some_and(|ui| width * ui.window().scale_factor() < 32_000.0)
+        }
+    });
+    let validation_timer = slint::Timer::default();
+    ui.on_validate_body({
+        let weak = ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_body_validation(Validation::default());
+            let weak = weak.clone();
+            validation_timer.start(slint::TimerMode::SingleShot, Duration::from_millis(250), move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_body_validation(validation::check(&ui.get_body_text(), ui.get_body_type()));
+                }
+            });
+        }
+    });
     let var_assist = ui.global::<VarAssist>();
     var_assist.on_matches(|names, text, caret, all| {
         let names: Vec<String> = names.iter().map(String::from).collect();
@@ -695,10 +909,9 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
             }
         }
     });
-    // `confirmed` is true once the user has agreed to upload the file named in the "Send a file?" dialog.
-    let send = Rc::new({
+    ui.on_send({
         let (weak, c) = (ui.as_weak(), c.clone());
-        move |confirmed: bool| {
+        move || {
             let ui = weak.unwrap();
             if ui.get_sending() {
                 return;
@@ -713,70 +926,97 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
                 )
             });
             let Some((project, folders, request)) = job else { return };
-            // Only for what can fail before any network and for the file dialog. Shortcut: a `$response` in the
-            // file path or host shows unresolved there; resolve it first if that ever matters.
-            let prepared = http::prepare(&project, &folders.iter().collect::<Vec<_>>(), &request);
-            // A file body goes out only after the user has seen which file and which host (the dialog is kind 8).
-            if !confirmed
-                && let Ok(p) = &prepared
-                && let http::Payload::File(path) = &p.payload
-            {
-                ui.set_send_file_path(path.display().to_string().into());
-                ui.set_send_file_host(p.host().into());
-                ui.set_prompt_kind(8);
-                ui.set_prompt_open(true);
-                return;
-            }
             ui.set_error_kind(-1);
-            ui.set_has_response(false);
+            highlight::clear_response(&ui);
             ui.set_request_log("".into());
             ui.set_warning_vars("".into());
-            match prepared {
-                Err(e) => show_error(&ui, e),
-                Ok(_) => {
-                    ui.set_sending(true);
-                    let (weak, generation, responses) = (weak.clone(), c.generation.clone(), c.responses.clone());
-                    let started_on = generation.load(Ordering::SeqCst);
-                    // Blocking work stays off the UI thread; the result comes back through the event loop.
-                    std::thread::spawn(move || {
-                        let result =
-                            chain::prepare(&project, &folders.iter().collect::<Vec<_>>(), &request, &responses)
-                                .and_then(|prepared| {
-                                    // Shown now, so the request is visible while it waits for the response.
-                                    let (log, missing) = (http::request_log(&prepared), prepared.missing.join(", "));
-                                    let (ui, generation) = (weak.clone(), generation.clone());
-                                    let _ = slint::invoke_from_event_loop(move || {
-                                        if let Some(ui) =
-                                            ui.upgrade().filter(|_| generation.load(Ordering::SeqCst) == started_on)
-                                        {
-                                            ui.set_warning_vars(missing.into());
-                                            ui.set_request_log(log.into());
-                                        }
-                                    });
-                                    http::send(prepared)
-                                })
-                                .inspect(|r| responses.store(&project.id, &request.name, r));
-                        let _ = slint::invoke_from_event_loop(move || {
-                            let Some(ui) = weak.upgrade() else { return };
-                            if generation.load(Ordering::SeqCst) != started_on {
-                                return; // another request was selected meanwhile
-                            }
-                            ui.set_sending(false);
-                            match result {
-                                Ok(response) => show_response(&ui, response),
-                                Err(e) => show_error(&ui, e),
-                            }
-                        });
+            ui.set_sending(true);
+            let (weak, generation, responses, dialogs) = (
+                weak.clone(),
+                c.generation.clone(),
+                c.responses.clone(),
+                c.dialogs.clone(),
+            );
+            let started_on = generation.load(Ordering::SeqCst);
+            // Blocking work stays off the UI thread; the result comes back through the event loop.
+            std::thread::spawn(move || {
+                let responses = responses.for_send(generation.clone(), started_on);
+                let result = chain::prepare_interactive(
+                    &project,
+                    &folders.iter().collect::<Vec<_>>(),
+                    &request,
+                    &responses,
+                    &mut |spec| dialogs.ask(&weak, &generation, started_on, spec.clone(), false),
+                    &mut |prepared| {
+                        if generation.load(Ordering::SeqCst) != started_on {
+                            return Err(Error::Cancelled);
+                        }
+                        if let http::Payload::File(path) = &prepared.payload {
+                            dialogs.ask(
+                                &weak,
+                                &generation,
+                                started_on,
+                                fastapiclient_core::resolve::Prompt {
+                                    label: path.display().to_string(),
+                                    description: prepared.host(),
+                                    default: String::new(),
+                                },
+                                true,
+                            )?;
+                        }
+                        if generation.load(Ordering::SeqCst) != started_on {
+                            return Err(Error::Cancelled);
+                        }
+                        Ok(())
+                    },
+                )
+                .and_then(|prepared| {
+                    // Shown now, so the request is visible while it waits for the response.
+                    let (log, missing) = (http::request_log(&prepared), prepared.missing.join(", "));
+                    let (ui, generation) = (weak.clone(), generation.clone());
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui.upgrade().filter(|_| generation.load(Ordering::SeqCst) == started_on) {
+                            ui.set_warning_vars(missing.into());
+                            ui.set_request_log(log.into());
+                        }
                     });
-                }
-            }
+                    responses.invalidate(&project, &request.name)?;
+                    http::send(prepared)
+                })
+                .inspect(|r| {
+                    // Names can repeat: only the request `$response` would fetch may own the cached value.
+                    if project.owns_response_name(&request) {
+                        responses.store(&project, &request.name, r);
+                    }
+                });
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    if generation.load(Ordering::SeqCst) != started_on {
+                        return; // another request was selected meanwhile
+                    }
+                    ui.set_sending(false);
+                    match result {
+                        Ok(response) => show_response(&ui, response),
+                        Err(e) => show_error(&ui, e),
+                    }
+                });
+            });
         }
     });
-    ui.on_send({
-        let send = send.clone();
-        move || send(false)
+    ui.on_send_prompt_reply({
+        let c = c.clone();
+        move |accepted, text| {
+            c.dialogs
+                .reply(c.generation.load(Ordering::SeqCst), accepted.then(|| text.to_string()))
+        }
     });
-    ui.on_send_confirmed(move || send(true));
+    ui.on_send_confirmed({
+        let c = c.clone();
+        move || {
+            c.dialogs
+                .reply(c.generation.load(Ordering::SeqCst), Some(String::new()))
+        }
+    });
     ui.on_find(|hay, needle, from, backward| {
         fastapiclient_core::find::find(&hay, &needle, from.max(0) as usize, backward)
             .map(|f| Found {
@@ -846,9 +1086,18 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
     ui.window().on_close_requested({
         let (weak, c, settings) = (ui.as_weak(), c.clone(), settings.clone());
         move || {
+            c.generation.fetch_add(1, Ordering::SeqCst);
+            c.dialogs.cancel();
             if let Some(ui) = weak.upgrade() {
+                ui.set_sending(false);
+                if matches!(ui.get_prompt_kind(), 8 | 9) {
+                    ui.set_prompt_open(false);
+                }
                 flush(&ui, &c);
                 let app = c.app.borrow();
+                if !app.dirty.is_empty() {
+                    return slint::CloseRequestResponse::KeepWindowShown;
+                }
                 if app.persist {
                     let mut settings = settings.borrow_mut();
                     let size = ui.window().size().to_logical(ui.window().scale_factor());
@@ -861,6 +1110,8 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
                     (settings.last_folder, settings.last_request) =
                         (sel.and_then(|s| s.folder), sel.and_then(|s| s.request));
                     settings.auto_beautify = ui.get_auto_beautify();
+                    settings.sidebar_width = ui.get_sidebar_width();
+                    settings.request_split = ui.get_request_split();
                     settings.theme = THEMES
                         .get(ui.get_color_scheme_index() as usize)
                         .copied()
@@ -889,13 +1140,14 @@ fn show_response(ui: &Main, r: Response) {
     ui.set_size_bytes(r.body.len() as i32);
     ui.set_truncated(r.truncated);
     let body = String::from_utf8_lossy(&r.body);
-    ui.set_response_pretty(
-        pretty_json(&body)
-            .or_else(|| pretty_xml(&body))
-            .unwrap_or_default()
-            .into(),
-    );
-    ui.set_response_body(body.into_owned().into());
+    let content_type = r
+        .headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("content-type"))
+        .map(|(_, value)| value.as_str())
+        .unwrap_or("");
+    ui.set_has_response(true);
+    highlight::response(ui, &body, content_type);
     let headers: Vec<String> = r.headers.iter().map(|(k, v)| format!("{k}: {v}")).collect();
     ui.set_response_headers(headers.join("\n").into());
     ui.set_has_response(true);
@@ -905,6 +1157,7 @@ fn show_response(ui: &Main, r: Response) {
 fn show_error(ui: &Main, e: Error) {
     // `extra` is the name of the request a `$response` needed.
     let (kind, detail, extra) = match e {
+        Error::Cancelled => return,
         Error::Url => (0, String::new(), String::new()),
         Error::Method => (1, String::new(), String::new()),
         Error::Header(h) => (2, h, String::new()),
@@ -912,6 +1165,8 @@ fn show_error(ui: &Main, e: Error) {
         Error::OAuthPending => (4, String::new(), String::new()),
         Error::Network(d) => (5, d, String::new()),
         Error::Dependency(name, d) => (6, d, name),
+        Error::DependencyJson(name) => (8, String::new(), name),
+        Error::CacheLimit => (9, String::new(), String::new()),
         Error::Cycle(name) => (7, String::new(), name),
     };
     ui.set_error_kind(kind);
@@ -959,7 +1214,8 @@ mod tests {
     fn guesses_extension() {
         assert_eq!(guess_ext(" {\"a\":1}"), "json");
         assert_eq!(guess_ext("[1]"), "json");
-        assert_eq!(guess_ext("<!DOCTYPE html><p>"), "html");
+        // A server's HTML must not open in a browser, where its scripts would run.
+        assert_eq!(guess_ext("<!DOCTYPE html><p>"), "txt");
         assert_eq!(guess_ext("<?xml version=\"1.0\"?>"), "xml");
         assert_eq!(guess_ext("hello"), "txt");
     }

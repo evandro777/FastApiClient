@@ -7,7 +7,7 @@ use fastapiclient_core::{
 use slint::{Model, SharedString, VecModel};
 use std::rc::Rc;
 
-use crate::{KeyValueRow, Main, Tables};
+use crate::{CodeChange, KeyValueRow, Main, Tables};
 
 pub const STANDARD_METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
@@ -172,21 +172,71 @@ pub fn store(ui: &Main, t: &Tables, methods: &VecModel<SharedString>, node: Node
 
 pub type Methods = Rc<VecModel<SharedString>>;
 
-/// What Tab inserts in the JSON, XML and environment editors. Shortcut: a selection spanning several lines is
-/// replaced by it like any typed text, not indented line by line; add that if people ask for it.
+/// What Tab inserts in the JSON, XML and environment editors.
 pub const INDENT: &str = "    ";
 
-/// `text` with the selection (byte offsets from the widget) replaced by one indent. Offsets are snapped to character
-/// boundaries, so a stale or out-of-range one can never split a character or panic.
-pub fn indent(text: &str, start: usize, end: usize) -> String {
-    let snap = |i: usize| {
-        (0..=i.min(text.len()))
-            .rev()
-            .find(|&j| text.is_char_boundary(j))
-            .unwrap_or(0)
+/// Offsets are UTF-8 byte positions, as used by Slint. Keep selection direction when editing whole lines.
+pub fn indent(text: &str, anchor: usize, caret: usize, unindent: bool) -> CodeChange {
+    let (anchor, caret) = (snap(text, anchor), snap(text, caret));
+    if anchor == caret && !unindent {
+        let mut out = text.to_owned();
+        out.insert_str(caret, INDENT);
+        return CodeChange {
+            text: out.into(),
+            anchor: (caret + INDENT.len()) as i32,
+            caret: (caret + INDENT.len()) as i32,
+        };
+    }
+    let (start, end) = (anchor.min(caret), anchor.max(caret));
+    let first = text[..start].rfind('\n').map_or(0, |i| i + 1);
+    let mut edits = vec![];
+    let mut line = first;
+    loop {
+        let removed = if !unindent {
+            0
+        } else if text[line..].starts_with('\t') {
+            1
+        } else {
+            text[line..]
+                .bytes()
+                .take(INDENT.len())
+                .take_while(|&b| b == b' ')
+                .count()
+        };
+        edits.push((line, removed));
+        match text[line..].find('\n').map(|i| line + i + 1) {
+            Some(next) if next < end => line = next,
+            _ => break,
+        }
+    }
+    let adjusted = |position: usize| {
+        let mut result = position;
+        for &(line, removed) in &edits {
+            if line <= position {
+                if unindent {
+                    result -= removed.min(position - line);
+                } else {
+                    result += INDENT.len();
+                }
+            }
+        }
+        result as i32
     };
-    let (start, end) = (snap(start), snap(end));
-    format!("{}{INDENT}{}", &text[..start], &text[end.max(start)..])
+    let mut out = String::with_capacity(text.len() + if unindent { 0 } else { edits.len() * INDENT.len() });
+    let mut copied = 0;
+    for &(line, removed) in &edits {
+        out.push_str(&text[copied..line]);
+        if !unindent {
+            out.push_str(INDENT);
+        }
+        copied = line + removed;
+    }
+    out.push_str(&text[copied..]);
+    CodeChange {
+        text: out.into(),
+        anchor: adjusted(anchor),
+        caret: adjusted(caret),
+    }
 }
 
 fn snap(text: &str, i: usize) -> usize {
@@ -194,6 +244,103 @@ fn snap(text: &str, i: usize) -> usize {
         .rev()
         .find(|&j| text.is_char_boundary(j))
         .unwrap_or(0)
+}
+
+pub fn line_numbers(text: &str) -> String {
+    (1..=text.bytes().filter(|&b| b == b'\n').count() + 1)
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Enter replaces the selection, preserving its line's indent. Only request editors use this.
+pub fn enter(text: &str, anchor: usize, caret: usize, kind: i32) -> CodeChange {
+    let (start, end) = (snap(text, anchor.min(caret)), snap(text, anchor.max(caret)));
+    let line = text[..start].rsplit('\n').next().unwrap_or("");
+    let indent = &line[..line.bytes().take_while(|b| matches!(b, b' ' | b'\t')).count()];
+    let before = text[..start].trim_end_matches([' ', '\t']);
+    let after = text[end..].trim_start_matches([' ', '\t']);
+    let opening = if kind == 3 {
+        before.ends_with(['{', '[']) && json_outside_string(before)
+    } else {
+        xml_opening(before).is_some()
+    };
+    let matching = if kind == 3 {
+        (before.ends_with('{') && after.starts_with('}')) || (before.ends_with('[') && after.starts_with(']'))
+    } else {
+        xml_opening(before).is_some_and(|name| {
+            after.strip_prefix("</").is_some_and(|tail| {
+                tail.strip_prefix(name)
+                    .is_some_and(|s| s.starts_with(['>', ' ', '\t', '\r', '\n']))
+            })
+        })
+    };
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let extra = if opening { INDENT } else { "" };
+    let mut out = format!("{}{eol}{indent}{extra}", &text[..start]);
+    let position = out.len() as i32;
+    if opening && matching {
+        out.push_str(&format!("{eol}{indent}"));
+    }
+    out.push_str(if opening && matching { after } else { &text[end..] });
+    CodeChange {
+        text: out.into(),
+        anchor: position,
+        caret: position,
+    }
+}
+
+fn json_outside_string(text: &str) -> bool {
+    let Ok(text) = crate::validation::json_without_comments(text) else {
+        return false;
+    };
+    // An opening delimiter in a comment is masked out.
+    if !text.trim_end().ends_with(['{', '[']) {
+        return false;
+    }
+    let (mut quoted, mut escaped) = (false, false);
+    for ch in text.chars() {
+        if escaped {
+            escaped = false;
+        } else if quoted && ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            quoted = !quoted;
+        }
+    }
+    !quoted
+}
+
+fn xml_opening(text: &str) -> Option<&str> {
+    for (open, close) in [("<!--", "-->"), ("<![CDATA[", "]]>")] {
+        if text
+            .rfind(open)
+            .is_some_and(|start| text.rfind(close).is_none_or(|end| start > end))
+        {
+            return None;
+        }
+    }
+    let (_, tag) = text.strip_suffix('>')?.rsplit_once('<')?;
+    if tag.starts_with(['/', '!', '?']) || tag.ends_with('/') {
+        return None;
+    }
+    let name = tag.split_whitespace().next()?;
+    if name.contains(['\'', '"', '<', '>']) {
+        return None;
+    }
+    let mut quote = None;
+    for ch in tag.chars() {
+        if quote == Some(ch) {
+            quote = None;
+        } else if quote.is_none() {
+            if matches!(ch, '\'' | '"') {
+                quote = Some(ch);
+            } else if ch == '>' {
+                return None;
+            }
+        }
+    }
+    quote.is_none().then_some(name)
 }
 
 /// Where an unfinished `{{partial` ends at `caret`: its start byte and the partial name typed so far.
@@ -249,6 +396,37 @@ pub fn caret_after_edit(old: &str, new: &str) -> usize {
 mod tests {
     use super::*;
 
+    #[test]
+    fn enter_indents_and_splits_matching_delimiters() {
+        let c = enter("    {}", 5, 5, 3);
+        assert_eq!(c.text, "    {\n        \n    }");
+        assert_eq!((c.anchor, c.caret), (14, 14));
+        assert_eq!(enter("[ ]", 1, 1, 3).text, "[\n    \n]");
+        assert_eq!(enter("  <a></a>", 5, 5, 4).text, "  <a>\n      \n  </a>");
+        assert_eq!(enter("<a/>", 4, 4, 4).text, "<a/>\n");
+        for source in ["hello>", "<!-- <a>", "<![CDATA[<a>", "<a x='>"] {
+            assert_eq!(enter(source, source.len(), source.len(), 4).text, format!("{source}\n"));
+        }
+        assert_eq!(enter("<a x='>'>", 9, 9, 4).text, "<a x='>'>\n    ");
+        assert_eq!(enter("<a></b>", 3, 3, 4).text, "<a>\n    </b>");
+        assert_eq!(enter("  abc", 5, 5, 3).text, "  abc\n  ");
+        assert_eq!(enter("{\n    ", 6, 6, 3).text, "{\n    \n    ");
+        assert_eq!(enter("<a>\n    ", 8, 8, 4).text, "<a>\n    \n    ");
+        assert_eq!(enter("  abc", 5, 2, 3).text, "  \n  ");
+        assert_eq!(enter("\"{", 2, 2, 3).text, "\"{\n");
+        assert_eq!(enter("// {", 4, 4, 3).text, "// {\n");
+        assert_eq!(
+            enter("{\r\n    []\r\n}", 8, 8, 3).text,
+            "{\r\n    [\r\n        \r\n    ]\r\n}"
+        );
+    }
+
+    #[test]
+    fn line_numbers_include_empty_and_trailing_lines() {
+        assert_eq!(line_numbers(""), "1");
+        assert_eq!(line_numbers("a\n\n"), "1\n2\n3");
+    }
+
     fn names() -> Vec<String> {
         ["host", "db.port", "token"].map(String::from).to_vec()
     }
@@ -293,22 +471,35 @@ mod tests {
     }
 
     #[test]
-    fn tab_inserts_at_the_cursor_and_replaces_a_selection() {
-        assert_eq!(indent("ab", 1, 1), "a    b");
-        assert_eq!(indent("", 0, 0), "    ");
-        assert_eq!(indent("hello world", 0, 5), "     world");
-        assert_eq!(indent("ab", 2, 2), "ab    ");
+    fn tab_preserves_selected_lines_and_direction() {
+        let change = indent("ab\ncd\nef", 4, 1, false);
+        assert_eq!(change.text, "    ab\n    cd\nef");
+        assert_eq!((change.anchor, change.caret), (12, 5));
+        assert_eq!(indent("ab\ncd", 0, 3, false).text, "    ab\ncd");
+        assert_eq!(indent("hello world", 0, 5, false).text, "    hello world");
+        assert_eq!(indent("ab", 1, 1, false).text, "a    b");
+        assert_eq!(indent("", 0, 0, false).text, "    ");
     }
 
     #[test]
     fn offsets_inside_a_character_or_past_the_end_are_safe() {
         // "é" is two bytes: offset 1 is inside it and snaps back to its start.
-        assert_eq!(indent("é", 1, 1), "    é");
-        assert_eq!(indent("ab", 99, 99), "ab    ");
-        assert_eq!(
-            indent("abc", 2, 1),
-            "ab    c",
-            "a reversed range is treated as empty at its start"
-        );
+        assert_eq!(indent("é", 1, 1, false).text, "    é");
+        assert_eq!(indent("ab", 99, 99, false).text, "ab    ");
+        let change = indent("é\r\n猫", 0, 7, false);
+        assert_eq!(change.text, "    é\r\n    猫");
+        assert_eq!((change.anchor, change.caret), (4, 15));
+    }
+
+    #[test]
+    fn unindent_handles_mixed_whitespace_and_carets_in_the_indent() {
+        let text = "    a\r\n\tb\r\n  c\r\nd";
+        let change = indent(text, text.len(), 2, true);
+        assert_eq!(change.text, "a\r\nb\r\nc\r\nd");
+        assert_eq!((change.anchor, change.caret), (10, 0));
+        let change = indent("  é", 1, 1, true);
+        assert_eq!(change.text, "é");
+        assert_eq!((change.anchor, change.caret), (0, 0));
+        assert_eq!(indent("a\n", 2, 2, true).text, "a\n");
     }
 }

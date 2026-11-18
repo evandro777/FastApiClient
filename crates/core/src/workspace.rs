@@ -311,7 +311,7 @@ impl Workspace {
                 .iter()
                 .chain(p.folders.iter().flat_map(|f| &f.requests))
                 .map(|r| r.name.as_str())
-                .filter(|n| !n.is_empty() && !n.contains('\''))
+                .filter(|n| !n.is_empty() && !n.contains(['\'', '\\']))
                 .collect();
             names.sort_unstable();
             names.dedup();
@@ -323,28 +323,10 @@ impl Workspace {
 
     pub fn active_env_index(&self) -> Option<usize> {
         let p = self.projects.get(self.sel?.project)?;
+        if p.active_env.is_empty() {
+            return None;
+        }
         p.environments.iter().position(|e| e.name == p.active_env)
-    }
-
-    /// Case-insensitive, because the active environment is stored by name.
-    fn unique_env_name(&self, project: usize, wanted: &str, skip: Option<usize>) -> String {
-        let taken = |n: &str| {
-            let envs = &self.projects[project].environments;
-            envs.iter()
-                .enumerate()
-                .any(|(i, e)| Some(i) != skip && e.name.eq_ignore_ascii_case(n))
-        };
-        if !taken(wanted) {
-            return wanted.into();
-        }
-        let mut n = 2;
-        loop {
-            let candidate = format!("{wanted} {n}");
-            if !taken(&candidate) {
-                return candidate;
-            }
-            n += 1;
-        }
     }
 
     /// Adds an empty environment to the selected project and makes it the active one. Returns the project to save.
@@ -355,7 +337,7 @@ impl Workspace {
         if name.is_empty() {
             return None;
         }
-        let name = self.unique_env_name(project, name, None);
+        let name = self.projects[project].unique_env_name(name, None);
         let p = &mut self.projects[project];
         p.environments.push(Environment {
             name: name.clone(),
@@ -371,7 +353,7 @@ impl Workspace {
         if name.is_empty() || index >= self.projects.get(project)?.environments.len() {
             return None;
         }
-        let name = self.unique_env_name(project, name, Some(index));
+        let name = self.projects[project].unique_env_name(name, Some(index));
         let p = &mut self.projects[project];
         let old = std::mem::replace(&mut p.environments[index].name, name.clone());
         if p.active_env == old {
@@ -464,6 +446,34 @@ impl Workspace {
         }
         out
     }
+
+    /// Request-name search keeps only matching requests and their ancestors, in the original tree order.
+    pub fn filtered_tree(&self, filter: &str) -> Vec<TreeItem> {
+        let rows = self.tree();
+        if filter.is_empty() {
+            return rows;
+        }
+        let filter = filter.to_lowercase();
+        let mut keep = vec![false; rows.len()];
+        let mut parents: Vec<usize> = vec![];
+        for (i, row) in rows.iter().enumerate() {
+            while parents.last().is_some_and(|&p| rows[p].depth >= row.depth) {
+                parents.pop();
+            }
+            if row.kind == Kind::Folder {
+                parents.push(i);
+            } else if row.text.to_lowercase().contains(&filter) {
+                keep[i] = true;
+                for &p in &parents {
+                    keep[p] = true;
+                }
+            }
+        }
+        rows.into_iter()
+            .zip(keep)
+            .filter_map(|(row, keep)| keep.then_some(row))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -524,6 +534,34 @@ mod tests {
         let expected = [(0, "A"), (1, "B"), (2, "deep"), (1, "C"), (1, "in-a"), (0, "D")];
         assert_eq!(names(&ws), expected.map(|(d, t)| (d, t.to_string())));
         assert_eq!(ws.projects[0].folder_chain(1), [0, 1]);
+    }
+
+    #[test]
+    fn filtering_preserves_ancestors_order_selection_and_duplicate_unicode_names() {
+        let mut ws = nested();
+        ws.projects[0].folders[1].requests[0].name = "CAFÉ 猫".into();
+        ws.projects[0].folders[0].requests[0].name = "café 猫".into();
+        let selection = ws.sel;
+        let rows = ws.filtered_tree("CaFÉ");
+        assert_eq!(
+            rows.iter().map(|r| (r.depth, r.text.as_str())).collect::<Vec<_>>(),
+            [(0, "A"), (1, "B"), (2, "CAFÉ 猫"), (1, "café 猫")]
+        );
+        assert_ne!(rows[2].sel, rows[3].sel);
+        assert_eq!(ws.sel, selection);
+        assert!(
+            ws.filtered_tree("A")
+                .iter()
+                .all(|r| r.kind == Kind::Folder || r.text.to_lowercase().contains('a'))
+        );
+        assert!(ws.filtered_tree("B").is_empty(), "folder names do not match");
+        assert!(ws.filtered_tree("missing").is_empty());
+        assert_eq!(ws.filtered_tree("").len(), ws.tree().len());
+        ws.add_project("Other");
+        ws.add_request("CAFÉ other project");
+        assert_eq!(ws.filtered_tree("café").len(), 1);
+        ws.select_project(0);
+        assert_eq!(ws.filtered_tree("café").len(), 4);
     }
 
     #[test]

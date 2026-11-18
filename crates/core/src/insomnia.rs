@@ -42,7 +42,9 @@ fn sorted(items: &[Value]) -> Vec<&Value> {
 fn tpl(text: &str) -> String {
     let (mut out, mut rest) = (String::with_capacity(text.len()), text);
     while let Some(start) = rest.find("{{") {
-        let Some(len) = rest[start + 2..].find("}}") else { break };
+        let Some(len) = crate::resolve::expression_end(&rest[start + 2..]) else {
+            break;
+        };
         let inner = &rest[start + 2..start + 2 + len];
         out.push_str(&rest[..start]);
         match inner.trim().strip_prefix("_.") {
@@ -151,6 +153,15 @@ fn request(item: &Value) -> Request {
         Some((kv, false)) => headers.push(kv),
         None => {}
     }
+    let mime = item.get("body").map(|b| s(b, "mimeType")).unwrap_or_default();
+    if !mime.is_empty()
+        && !mime.starts_with("multipart/form-data")
+        && !headers
+            .iter()
+            .any(|h| h.enabled && h.key.eq_ignore_ascii_case("content-type"))
+    {
+        headers.push(KeyValue::new("Content-Type", &mime));
+    }
     Request {
         name: s(item, "name"),
         method: s(item, "method").to_ascii_uppercase(),
@@ -218,37 +229,49 @@ fn env_data(env: &Value) -> Value {
             data[s(row, "name")] = row.get("value").cloned().unwrap_or(Value::Null);
         }
     }
+    // Literal headers merge without case; template variable names must retain their spelling.
+    if let Some(Value::Object(headers)) = data.get_mut("GLOBAL_HEADERS") {
+        *headers = std::mem::take(headers)
+            .into_iter()
+            .map(|(key, value)| {
+                let key = if key.contains("{{") {
+                    tpl(&key)
+                } else {
+                    key.to_ascii_lowercase()
+                };
+                (key, value)
+            })
+            .collect();
+    }
     data
 }
 
 /// Moves Insomnia's `GLOBAL_HEADERS` convention (headers a plugin sent on every request there) out of an
-/// environment's values and into project headers, as written. The first definition of a header wins.
-fn take_global_headers(values: &mut Value, headers: &mut Vec<KeyValue>) {
+/// environment's values. Compare effective environments before promoting them to shared headers.
+fn take_global_headers(values: &mut Value) -> Vec<KeyValue> {
     let Some(Value::Object(globals)) = values.as_object_mut().and_then(|o| o.remove("GLOBAL_HEADERS")) else {
-        return;
+        return vec![];
     };
-    for (key, value) in globals {
-        if !headers.iter().any(|h| h.key == key) {
-            headers.push(KeyValue::new(&key, &tpl(&text(&value))));
-        }
-    }
+    let headers: Vec<_> = globals
+        .into_iter()
+        .map(|(key, value)| KeyValue::new(&key, &tpl(&text(&value))))
+        .collect();
+    crate::resolve::merge_headers(&[&headers])
 }
 
 /// Every sub-environment becomes one holding base + its own values, so each is complete on its own. With no
 /// sub-environments the base itself is the only one. `GLOBAL_HEADERS` is not kept in them: see
 /// `take_global_headers`.
-fn environments(project: &mut Project, root: &Value) {
+fn environments(project: &mut Project, root: &Value) -> Result<(), ImportError> {
     let Some(env) = root.get("environments").filter(|e| e.is_object()) else {
-        return;
+        return Ok(());
     };
-    let mut base = env_data(env);
-    take_global_headers(&mut base, &mut project.headers);
+    let base = env_data(env);
     let subs = sorted(list(env, "subEnvironments"));
     let mut all: Vec<Environment> = subs
         .iter()
         .map(|sub| {
-            let mut own = env_data(sub);
-            take_global_headers(&mut own, &mut project.headers);
+            let own = env_data(sub);
             let mut values = base.clone();
             merge(&mut values, &own);
             Environment {
@@ -264,8 +287,19 @@ fn environments(project: &mut Project, root: &Value) {
             values: base,
         });
     }
-    project.active_env = all.first().map(|e| e.name.clone()).unwrap_or_default();
+    let mut shared = None;
+    for environment in &mut all {
+        let headers = take_global_headers(&mut environment.values);
+        if shared.as_ref().is_some_and(|previous| previous != &headers) {
+            return Err(ImportError::EnvironmentHeaders);
+        }
+        shared = Some(headers);
+    }
+    project.headers = crate::resolve::merge_headers(&[&shared.unwrap_or_default(), &project.headers]);
     project.environments = all;
+    project.normalize_environments();
+    project.active_env = project.environments.first().map(|e| e.name.clone()).unwrap_or_default();
+    Ok(())
 }
 
 /// Standard base64, no validation beyond the alphabet; `None` on anything else or non-UTF-8 output.
@@ -296,9 +330,9 @@ fn b64_decode(s: &str) -> Option<String> {
 fn response_tag(tag: &str, ids: &HashMap<String, String>) -> Option<String> {
     let a = crate::resolve::args(&format!("t({})", tag.trim().strip_prefix("response")?), "t")?;
     let (kind, id, filter, behavior) = (a.first()?, a.get(1)?, a.get(2)?, a.get(3)?);
-    let name = ids.get(id).filter(|n| !n.contains('\''))?;
+    let name = ids.get(id).filter(|n| !n.contains(['\'', '\\']))?;
     let path = b64_decode(filter.strip_prefix("b64::")?.split("::").next()?)?;
-    if kind != "body" || !path.starts_with('$') || path.contains('\'') {
+    if kind != "body" || !path.starts_with('$') || path.contains(['\'', '\\']) {
         return None;
     }
     // Insomnia's max age is often `_.variable`; ours names the environment variable the same way, without `_.`.
@@ -313,6 +347,32 @@ fn response_tag(tag: &str, ids: &HashMap<String, String>) -> Option<String> {
     })
 }
 
+/// Insomnia orders these as title, label, default, storage key, mask, default-to-last.
+fn prompt_tag(tag: &str) -> Option<String> {
+    let inner = tag.trim().strip_prefix("prompt")?;
+    if !inner.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let a = crate::resolve::arguments(inner)?;
+    if !(1..=6).contains(&a.len())
+        || a.iter()
+            .take(3)
+            .any(|(v, quoted)| !quoted || v.contains("{{") || v.contains("{%"))
+        || a[0].0.trim().is_empty()
+        || a.get(3).is_some_and(|(v, quoted)| !quoted || !v.is_empty())
+        || a.get(4).is_some_and(|(v, quoted)| *quoted || v != "false")
+        || a.get(5).is_some_and(|(v, quoted)| *quoted || v != "true")
+    {
+        return None;
+    }
+    let strings: Vec<_> = a
+        .iter()
+        .take(3)
+        .map(|(v, _)| format!("'{}'", v.replace('\\', "\\\\").replace('\'', "\\'")))
+        .collect();
+    Some(format!("{{{{ $prompt({}) }}}}", strings.join(", ")))
+}
+
 /// Rewrites every `{% response ... %}` in the strings of the file.
 fn convert_tags(v: &mut Value, ids: &HashMap<String, String>) {
     match v {
@@ -322,7 +382,8 @@ fn convert_tags(v: &mut Value, ids: &HashMap<String, String>) {
                 let Some(len) = rest[start + 2..].find("%}") else { break };
                 let end = start + 2 + len + 2;
                 out.push_str(&rest[..start]);
-                match response_tag(&rest[start + 2..end - 2], ids) {
+                let tag = &rest[start + 2..end - 2];
+                match response_tag(tag, ids).or_else(|| prompt_tag(tag)) {
                     Some(c) => out.push_str(&c),
                     None => out.push_str(&rest[start..end]),
                 }
@@ -365,12 +426,157 @@ pub fn import(text: &str) -> Result<Project, ImportError> {
     let name = s(&root, "name");
     let mut project = Project::new(if name.is_empty() { "Insomnia" } else { &name });
     items(&mut project, list(&root, "collection"), None);
-    environments(&mut project, &root);
+    environments(&mut project, &root)?;
     Ok(project)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn global_header_templates_keep_variable_case_and_convert_insomnia_names() {
+        use super::*;
+        let file = serde_json::json!({"type":"collection.insomnia.rest/5.0",
+            "collection":[{"name":"Get","method":"GET","url":"http://unused"}],
+            "environments":{"data":{"HeaderName":"X-One","headerName":"X-Two",
+                "GLOBAL_HEADERS":{"{{ _.HeaderName }}":"base","{{ _.headerName }}":"second","Accept":"base"}},
+                "subEnvironments":[{"name":"Dev","data":{"GLOBAL_HEADERS":{
+                    "{{ _.HeaderName }}":"child","accept":"child"}}}]}});
+        let project = import(&file.to_string()).unwrap();
+        let prepared = crate::http::prepare(&project, &[], &project.requests[0]).unwrap();
+        assert!(prepared.missing.is_empty(), "{:?}", prepared.missing);
+        for (name, value) in [("X-One", "child"), ("X-Two", "second"), ("accept", "child")] {
+            assert!(
+                prepared.headers.contains(&(name.into(), value.into())),
+                "{:?}",
+                prepared.headers
+            );
+        }
+        assert_eq!(
+            prepared
+                .headers
+                .iter()
+                .filter(|(key, _)| key.eq_ignore_ascii_case("accept"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn environment_names_are_repaired_before_selecting_the_first_imported_one() {
+        let file = r#"{"type":"collection.insomnia.rest/5.0","environments":{"subEnvironments":[{"name":"","data":{"host":"first"}},{"name":"Shared","data":{"host":"second"}},{"name":"Shared","data":{"host":"third"}}]}}"#;
+        let p = super::import(file).unwrap();
+        assert_eq!(
+            p.environments.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["1", "Shared", "Shared 2"]
+        );
+        assert_eq!(p.active_env, "1");
+        assert_eq!(p.active_values()["host"], "first");
+    }
+
+    #[test]
+    fn imported_media_types_survive_preparation() {
+        use super::*;
+        for mime in ["text/plain", "application/merge-patch+json", "application/graphql"] {
+            let file = serde_json::json!({
+                "type": "collection.insomnia.rest/5.0",
+                "collection": [{"name": "Post", "method": "POST", "url": "http://unused",
+                    "body": {"mimeType": mime, "text": "hello"}}]
+            });
+            let project = import(&file.to_string()).unwrap();
+            let prepared = crate::http::prepare(&project, &[], &project.requests[0]).unwrap();
+            assert_eq!(
+                prepared
+                    .headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                    .unwrap()
+                    .1,
+                mime
+            );
+            assert_eq!(prepared.payload, crate::http::Payload::Bytes(b"hello".to_vec()));
+            let mut explicit = file.clone();
+            explicit["collection"][0]["headers"] =
+                serde_json::json!([{"name": "content-type", "value": "custom/type"}]);
+            let project = import(&explicit.to_string()).unwrap();
+            let prepared = crate::http::prepare(&project, &[], &project.requests[0]).unwrap();
+            assert_eq!(
+                prepared
+                    .headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                    .unwrap()
+                    .1,
+                "custom/type"
+            );
+        }
+    }
+
+    #[test]
+    fn conflicting_environment_headers_are_rejected_but_shared_templates_work() {
+        use super::*;
+        let mut file = serde_json::json!({"type": "collection.insomnia.rest/5.0",
+            "environments": {"data": {"GLOBAL_HEADERS": {"Authorization": "Bearer {{token}}"}},
+                "subEnvironments": [{"name": "Dev", "data": {"token": "dev"}},
+                    {"name": "Prod", "data": {"token": "prod"}}]},
+            "collection": [{"name": "Get", "method": "GET", "url": "http://unused"}]});
+        let mut project = import(&file.to_string()).unwrap();
+        for (name, token) in [("Dev", "Bearer dev"), ("Prod", "Bearer prod")] {
+            project.active_env = name.into();
+            let prepared = crate::http::prepare(&project, &[], &project.requests[0]).unwrap();
+            assert_eq!(
+                prepared
+                    .headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+                    .unwrap()
+                    .1,
+                token
+            );
+        }
+        file["environments"]["subEnvironments"][0]["data"]["GLOBAL_HEADERS"] =
+            serde_json::json!({"Authorization": "Bearer dev"});
+        assert_eq!(import(&file.to_string()), Err(ImportError::EnvironmentHeaders));
+        file["environments"]["data"]["GLOBAL_HEADERS"] = serde_json::json!({"authorization": "Bearer prod"});
+        file["environments"]["subEnvironments"][0]["data"]["GLOBAL_HEADERS"] =
+            serde_json::json!({"Authorization": "Bearer dev"});
+        assert_eq!(import(&file.to_string()), Err(ImportError::EnvironmentHeaders));
+        file["environments"]["subEnvironments"][0]["data"]["GLOBAL_HEADERS"] =
+            serde_json::json!({"X-Only-Dev": "value"});
+        assert_eq!(import(&file.to_string()), Err(ImportError::EnvironmentHeaders));
+    }
+
+    #[test]
+    fn literal_prompts_convert_and_unsupported_options_stay_unchanged() {
+        use super::*;
+        use crate::resolve::Prompt;
+        for tag in [
+            "prompt 'Title'",
+            "prompt 'Title', 'Description', 'Default'",
+            "prompt 'Title', 'Description', 'Default', '', false, true",
+            r#"prompt '猫, café', 'Say \'yes\'', 'C:\\tmp'"#,
+        ] {
+            let converted = prompt_tag(tag).unwrap();
+            assert!(Prompt::parse(converted.trim_start_matches("{{").trim_end_matches("}}").trim()).is_some());
+        }
+        for tag in [
+            "prompt 'Title', 'Label', 'Default', 'remember'",
+            "prompt 'Title', '', '', '', true",
+            "prompt 'Title', '', '', '', false, false",
+            "prompt _.title",
+            "prompt ''",
+            "prompt 'Title', _.label",
+            "prompt 'Title' + 'Other'",
+            "prompt 'Title', '', '{{dynamic}}'",
+            "prompt 'unclosed",
+            "prompt 'Title', '', '', '', false, true, 1",
+            "prompt 'Title', '', '', '', f alse",
+        ] {
+            let source = format!("{{% {tag} %}}");
+            let mut value = Value::String(source.clone());
+            convert_tags(&mut value, &HashMap::new());
+            assert_eq!(value, Value::String(source), "{tag}");
+        }
+    }
     use serde_json::json;
 
     use super::*;
@@ -424,10 +630,10 @@ collection:
     authentication: { type: apikey, key: X-Key, value: k, addTo: queryParams }
 environments:
   name: Base Environment
-  data: { team: core, base: "http://base", GLOBAL_HEADERS: { Accept: "*/*" } }
+  data: { team: core, base: "http://base", GLOBAL_HEADERS: { Accept: "*/*", X-Y: "1" } }
   subEnvironments:
     - { name: Prod, meta: { sortKey: 2 }, data: { base: "http://prod" } }
-    - { name: Dev, meta: { sortKey: 1 }, data: { base: "http://dev", GLOBAL_HEADERS: { X-Y: "1" } } }
+    - { name: Dev, meta: { sortKey: 1 }, data: { base: "http://dev" } }
 "#;
 
     #[test]
@@ -457,8 +663,8 @@ environments:
         assert!(!fields[1].enabled, "a disabled row stays, switched off");
         assert_eq!(health.url, "{{base}}/health");
         assert_eq!(
-            health.query[0].value, "{% prompt 'a', 'b' %}",
-            "other tags are left as written"
+            health.query[0].value, "{{ $prompt('a', 'b') }}",
+            "literal prompt tags are converted"
         );
         assert!(matches!(&health.auth, Auth::Basic(b) if b.username == "u" && b.password == "p"));
         assert_eq!(health.body, Body::Json(r#"{"a": "{{base}}"}"#.into()));
@@ -503,6 +709,15 @@ environments:
     }
 
     #[test]
+    fn a_request_name_ending_in_a_backslash_leaves_the_tag_as_written() {
+        let tag = "{% response 'body', 'req_1', 'b64::JC5h::46b', 'never', 0 %}";
+        let file = format!(
+            "type: collection.insomnia.rest/5.0\nname: P\ncollection:\n  - name: 'Old\\'\n    meta: {{id: req_1}}\n    method: POST\n  - name: Use\n    meta: {{id: req_2}}\n    method: GET\n    authentication: {{type: bearer, token: \"{tag}\"}}\n"
+        );
+        assert_eq!(import(&file).unwrap().requests[1].auth, Auth::Bearer(tag.into()));
+    }
+
+    #[test]
     fn base64_decodes_with_and_without_padding() {
         assert_eq!(b64_decode("JC5hY2Nlc3NfdG9rZW4=").as_deref(), Some("$.access_token"));
         assert_eq!(b64_decode("YQ==").as_deref(), Some("a"));
@@ -527,7 +742,7 @@ environments:
         );
         // They become project headers with their literal values.
         let headers: Vec<_> = p.headers.iter().map(|h| (h.key.as_str(), h.value.as_str())).collect();
-        assert_eq!(headers, [("Accept", "*/*"), ("X-Y", "1")]);
+        assert_eq!(headers, [("accept", "*/*"), ("x-y", "1")]);
     }
 
     #[test]

@@ -13,10 +13,10 @@ export component Prompt inherits Rectangle {
     background: Family.scrim;
     init => { if !root.with-input { keys.focus(); } }
 
-    // Swallows clicks so nothing behind the overlay is reachable; a click outside the card closes it.
-    TouchArea { clicked => { root.dismiss(); } }
     // `capture-key-pressed` so Escape works while the text field has the focus.
     keys := FocusScope {
+        // Keep the backdrop inside the focus scope so the scope cannot intercept outside clicks.
+        TouchArea { clicked => { root.dismiss(); } }
         capture-key-pressed(event) => {
             if event.text == Key.Escape {
                 root.dismiss();
@@ -42,10 +42,18 @@ export component Prompt inherits Rectangle {
                 alignment: start;
                 Text { text: root.title; font-size: Family.page-title; font-weight: Family.page-weight; wrap: word-wrap; }
                 if root.message != "": Text { text: root.message; wrap: word-wrap; }
-                if root.with-input: LineEdit {
-                    text <=> root.text;
-                    init => { self.focus(); self.select-all(); }
-                    accepted => { root.confirmed(root.text); }
+                if root.with-input: HorizontalLayout {
+                    field := LineEdit {
+                        text <=> root.text;
+                        init => { self.focus(); self.select-all(); }
+                        accepted => { root.confirmed(root.text); }
+                    }
+                    // A closing row popup restores its old focus after this field's init.
+                    Timer {
+                        interval: 1ms;
+                        running: true;
+                        triggered => { self.running = false; field.focus(); field.select-all(); }
+                    }
                 }
                 HorizontalLayout {
                     alignment: end;

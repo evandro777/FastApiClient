@@ -219,11 +219,62 @@ impl Project {
         Some((self.folder_chain(i).into_iter().map(|j| &self.folders[j]).collect(), r))
     }
 
+    /// Whether `request` is the one `find_request` reaches by its name. Names can repeat, and only that one may own the
+    /// cached `$response` value, or another request's token would be used.
+    pub fn owns_response_name(&self, request: &Request) -> bool {
+        self.find_request(&request.name)
+            .is_some_and(|(_, found)| found == request)
+    }
+
     pub fn active_values(&self) -> &Value {
+        if self.active_env.is_empty() {
+            return &Value::Null;
+        }
         self.environments
             .iter()
             .find(|e| e.name == self.active_env)
             .map_or(&Value::Null, |e| &e.values)
+    }
+
+    pub(crate) fn unique_env_name(&self, wanted: &str, skip: Option<usize>) -> String {
+        let taken = |name: &str| {
+            self.environments
+                .iter()
+                .enumerate()
+                .any(|(i, env)| Some(i) != skip && env.name.eq_ignore_ascii_case(name))
+        };
+        if !taken(wanted) {
+            return wanted.into();
+        }
+        let mut n = 2;
+        loop {
+            let candidate = format!("{wanted} {n}");
+            if !taken(&candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
+    /// Names identify environments. Preserve the active entry while repairing external names.
+    pub(crate) fn normalize_environments(&mut self) {
+        let active = self
+            .environments
+            .iter()
+            .position(|env| !self.active_env.is_empty() && env.name == self.active_env);
+        for env in &mut self.environments {
+            env.name = env.name.trim().to_owned();
+        }
+        // Walk backwards so the first duplicate keeps its name; existing suffixes remain reserved.
+        for i in (0..self.environments.len()).rev() {
+            let wanted = if self.environments[i].name.is_empty() {
+                (i + 1).to_string()
+            } else {
+                self.environments[i].name.clone()
+            };
+            self.environments[i].name = self.unique_env_name(&wanted, Some(i));
+        }
+        self.active_env = active.map(|i| self.environments[i].name.clone()).unwrap_or_default();
     }
 }
 
@@ -239,6 +290,22 @@ pub fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_first_request_of_a_repeated_name_owns_it() {
+        let named = |url: &str| Request {
+            name: "Login".into(),
+            url: url.into(),
+            ..Request::default()
+        };
+        let mut p = Project::new("p");
+        p.folders.push(Folder::default());
+        p.folders.push(Folder::default());
+        p.folders[0].requests.push(named("http://first"));
+        p.folders[1].requests.push(named("http://second"));
+        assert!(p.owns_response_name(&p.folders[0].requests[0]));
+        assert!(!p.owns_response_name(&p.folders[1].requests[0]));
+    }
 
     #[test]
     fn old_files_still_load() {
@@ -277,6 +344,77 @@ mod tests {
             values: serde_json::json!({"db": {"port": 1}}),
         };
         assert_eq!(env.pretty(), "{\n    \"db\": {\n        \"port\": 1\n    }\n}");
+    }
+
+    #[test]
+    fn environment_numbers_survive_editing_and_project_roundtrips() {
+        for number in [
+            "12345678901234567890123",
+            "-12345678901234567890123",
+            "0.12345678901234567890123",
+        ] {
+            let env = Environment {
+                name: "Exact".into(),
+                values: Environment::parse(&format!("{{\"id\":{number}}}")).unwrap(),
+            };
+            let edited = Environment::parse(&env.pretty()).unwrap();
+            assert_eq!(crate::resolve::substitute("{{id}}", &edited).0, number);
+            let mut project = Project::new("Exact numbers");
+            project.active_env = env.name.clone();
+            project.environments.push(env);
+            let saved = serde_json::to_string(&project).unwrap();
+            let restored: Project = serde_json::from_str(&saved).unwrap();
+            assert_eq!(crate::resolve::substitute("{{id}}", restored.active_values()).0, number);
+            let exported = crate::exchange::export(&restored, true);
+            let imported = crate::exchange::import(&exported).unwrap();
+            assert_eq!(
+                crate::resolve::substitute("{{id}}", imported[0].active_values()).0,
+                number
+            );
+        }
+    }
+
+    #[test]
+    fn external_environment_names_are_unique_and_keep_the_active_entry() {
+        for active in ["Shared", " Shared 2 ", "", "missing", "   "] {
+            let mut p = Project::new("Names");
+            p.environments = ["Shared", "shared", " Shared 2 ", "", "   ", "6", "SHARED"]
+                .iter()
+                .enumerate()
+                .map(|(i, name)| Environment {
+                    name: (*name).into(),
+                    values: serde_json::json!({"id": i}),
+                })
+                .collect();
+            p.active_env = active.into();
+            let expected = p.active_values().clone();
+            p.normalize_environments();
+            let mut seen = std::collections::HashSet::new();
+            for env in &p.environments {
+                assert!(!env.name.is_empty());
+                assert_eq!(env.name, env.name.trim());
+                assert!(seen.insert(env.name.to_ascii_lowercase()));
+            }
+            assert_eq!(p.environments[0].name, "Shared");
+            assert_eq!(p.active_values(), &expected);
+            let normalized = p.clone();
+            p.normalize_environments();
+            assert_eq!(p, normalized);
+        }
+    }
+
+    #[test]
+    fn no_environment_never_matches_an_unnamed_entry() {
+        let mut p = Project::new("No environment");
+        p.environments.push(Environment {
+            name: String::new(),
+            values: serde_json::json!({"host": "production"}),
+        });
+        assert!(p.active_values().is_null());
+        let mut ws = crate::workspace::Workspace::new(vec![p]);
+        ws.set_active_env(None);
+        assert_eq!(ws.active_env_index(), None);
+        assert!(ws.projects[0].active_values().is_null());
     }
 
     #[test]

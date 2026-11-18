@@ -1,26 +1,68 @@
 import { Palette, ScrollView } from "std-widgets.slint";
 import { VarAssist, VarList } from "var-popup.slint";
+import { Family } from "family.slint";
 
 // The text edit that Rust helps: Slint strings have no substring, so the indentation is inserted by Rust.
+export struct CodeChange { text: string, anchor: int, caret: int }
+export struct ColorRun { text: string, kind: int }
+export struct ColorLine { runs: [ColorRun] }
+export struct ColoredText { source: string, kind: int, lines: [ColorLine] }
 export global CodeEditing {
-    // The text with the selection (byte offsets, start then end) replaced by one level of indentation.
-    pure callback indent(string, int, int) -> string;
-    // How many bytes `indent` inserts when nothing is selected, to place the cursor after it.
-    pure callback indent-width() -> int;
+    in property <string> monospace-family: "DejaVu Sans Mono";
+    pure callback indent(string, int, int, bool) -> CodeChange;
+    pure callback enter(string, int, int, int) -> CodeChange;
+    pure callback format(string, int) -> string;
+    pure callback line-numbers(string) -> string;
+    pure callback selection-safe(float, int, int) -> bool;
+    callback highlight(string, int, int);
+    in property <ColoredText> request;
+    in property <ColoredText> response;
 }
 
 // A multi-line editor for JSON, XML and environment text. It looks like the standard `TextEdit`, but Tab indents
-// instead of moving the focus to the next field (Shift+Tab still leaves the field).
+// and Shift+Tab unindents the selected lines.
 export component CodeEdit inherits Rectangle {
     in-out property <string> text <=> input.text;
     callback edited(string);
     // Variables offered after `{{` or Ctrl+Space; empty for the environment editor, which defines them.
     in property <[string]> var-names;
     in property <bool> var-assist: false;
+    // Zero leaves the environment editor's native Enter, wrapping and paste behavior alone.
+    in property <int> body-kind;
+    in property <bool> read-only: false;
+    in property <int> syntax-kind: root.body-kind;
+    in property <int> highlight-slot: root.read-only ? 1 : root.body-kind == 0 ? -1 : 0;
+    property <bool> code-mode: root.body-kind != 0 || root.syntax-kind != 0;
+    property <ColoredText> colored: root.highlight-slot == 0 ? CodeEditing.request : CodeEditing.response;
+    property <bool> coloring: root.syntax-kind != 0 && root.colored.kind == root.syntax-kind
+        && root.colored.source == root.text && input.preedit-text == "";
+    property <bool> caret-visible: true;
+    // Slint 1.18 casts native selection rectangles to i16 before clipping them.
+    property <bool> selection-safe: !root.code-mode || CodeEditing.selection-safe(input.preferred-width / 1px,
+        input.anchor-position-byte-offset, input.cursor-position-byte-offset);
+    property <length> line-height: two-lines.preferred-height - one-line.preferred-height;
+    property <int> first-line: max(0, floor(-view.content-y / root.line-height));
+    property <int> visible-lines: ceil(view.visible-height / root.line-height) + 1;
+    changed text => { CodeEditing.highlight(root.text, root.syntax-kind, root.highlight-slot); }
+    changed syntax-kind => { CodeEditing.highlight(root.text, root.syntax-kind, root.highlight-slot); }
+    init => { CodeEditing.highlight(root.text, root.syntax-kind, root.highlight-slot); }
+    public function set-selection-offsets(anchor: int, caret: int) { input.set-selection-offsets(anchor, caret); }
+    public function select-all() { input.select-all(); }
+    public function copy() { input.copy(); }
+    public function format-body() {
+        let formatted = CodeEditing.format(input.text, root.body-kind);
+        if formatted != input.text {
+            root.apply({ text: formatted, anchor: input.anchor-position-byte-offset, caret: input.cursor-position-byte-offset });
+        }
+        input.focus();
+    }
+    property <length> gutter-width: root.body-kind == 0 ? 0px : numbers.preferred-width + 16px;
     // The text and cursor before the last pick, for Ctrl+Z (setting the text from code bypasses the widget's undo).
     property <string> undo-text;
     property <int> undo-caret;
+    property <int> undo-anchor;
     property <bool> can-undo;
+    property <bool> tab-navigation;
     property <length> cx;
     property <length> cy;
     background: Palette.control-background;
@@ -33,78 +75,201 @@ export component CodeEdit inherits Rectangle {
     accessible-role: text-input;
     accessible-value <=> input.text;
 
-    view := ScrollView {
-        x: 8px;
+    function remember() {
+        root.undo-text = input.text;
+        root.undo-anchor = input.anchor-position-byte-offset;
+        root.undo-caret = input.cursor-position-byte-offset;
+    }
+    function apply(change: CodeChange) {
+        root.remember();
+        input.text = change.text;
+        input.set-selection-offsets(change.anchor, change.caret);
+        root.can-undo = true;
+        list.dismiss();
+        root.edited(input.text);
+    }
+
+    // Measure with the same font as the input, including the font's native line spacing.
+    one-line := Text {
+        visible: false;
+        text: "M";
+        font-family: CodeEditing.monospace-family;
+        font-size: 14px;
+    }
+    two-lines := Text {
+        visible: false;
+        text: "M\nM";
+        font-family: CodeEditing.monospace-family;
+        font-size: 14px;
+    }
+    Timer {
+        interval: 500ms;
+        running: root.coloring && input.has-focus && !root.read-only;
+        triggered => { root.caret-visible = !root.caret-visible; }
+    }
+
+    Rectangle {
+        x: 1px;
         y: 8px;
-        width: parent.width - 16px;
-        height: parent.height - 16px;
-        content-width: self.visible-width;
-        content-height: max(self.visible-height, input.preferred-height);
-
-        input := TextInput {
-            single-line: false;
-            wrap: word-wrap;
-            color: Palette.foreground;
-            selection-background-color: Palette.selection-background;
-            selection-foreground-color: Palette.selection-foreground;
-            page-height: view.visible-height;
-            // The ScrollView of the widget takes care of this.
+        width: root.gutter-width;
+        height: view.visible-height;
+        clip: true;
+        numbers := Text {
+            x: 0px;
+            y: view.content-y;
+            width: parent.width - 8px;
+            text: root.body-kind == 0 ? "" : CodeEditing.line-numbers(root.text);
+            font-family: CodeEditing.monospace-family;
+            font-size: 14px;
+            horizontal-alignment: right;
+            color: Palette.foreground.with-alpha(0.5);
             accessible-role: none;
+        }
+    }
 
-            changed has-focus => { if !self.has-focus { root.can-undo = false; list.dismiss(); } }
+    ContextMenuArea {
+        Menu {
+            MenuItem { title: @tr("Cut"); enabled: !root.read-only; activated => { input.cut(); } }
+            MenuItem { title: @tr("Copy"); activated => { input.copy(); } }
+            MenuItem { title: @tr("Paste"); enabled: !root.read-only; activated => { input.paste(); } }
+            MenuItem { title: @tr("Select All"); activated => { input.select-all(); } }
+        }
+        view := ScrollView {
+            x: 8px + root.gutter-width;
+            y: 8px;
+            width: max(0px, parent.width - 16px - root.gutter-width);
+            height: parent.height - 16px;
+            content-width: !root.code-mode ? self.visible-width : max(self.visible-width, input.preferred-width + 2px);
+            content-height: max(self.visible-height, input.preferred-height);
 
-            edited => {
-                root.can-undo = false;
-                root.edited(self.text);
-                if root.var-assist { list.update(self.text, self.cursor-position-byte-offset, false); }
+            if root.coloring: Rectangle {
+                x: 0px;
+                y: 0px;
+                width: input.width;
+                height: input.height;
+                for offset in min(root.visible-lines, max(0, root.colored.lines.length - root.first-line)): Rectangle {
+                    property <ColorLine> line: root.colored.lines[root.first-line + offset];
+                    x: 0px;
+                    y: (root.first-line + offset) * root.line-height;
+                    width: parent.width;
+                    height: one-line.preferred-height;
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 0px;
+                        for run in parent.line.runs: Text {
+                            text: run.text;
+                            font-family: CodeEditing.monospace-family;
+                            font-size: 14px;
+                            horizontal-stretch: 0;
+                            // VS Code Dark+ / Light+ token colors (native UI colors stay in Palette).
+                            // https://github.com/microsoft/vscode/tree/main/extensions/theme-defaults/themes
+                            color: run.kind == 1 ? (Family.dark ? #ce9178 : #a31515) // JSON string
+                                : run.kind == 2 ? (Family.dark ? #b5cea8 : #098658) // Number
+                                : run.kind == 3 ? (Family.dark ? #569cd6 : #800000) // XML tag
+                                : run.kind == 4 ? (Family.dark ? #6a9955 : #008000) // Comment
+                                : run.kind == 5 ? (Family.dark ? #f44747 : #cd3131) // Invalid
+                                : run.kind == 6 ? (Family.dark ? #9cdcfe : #0451a5) // JSON key
+                                : run.kind == 7 ? (Family.dark ? #569cd6 : #0000ff) // Boolean/null
+                                : run.kind == 8 ? (Family.dark ? #9cdcfe : #e50000) // XML attribute
+                                : run.kind == 9 ? (Family.dark ? #ce9178 : #0000ff) // XML string
+                                : Palette.foreground;
+                            accessible-role: none;
+                        }
+                    }
+                }
             }
+            input := TextInput {
+                x: 0px;
+                y: 0px;
+                single-line: false;
+                read-only: root.read-only;
+                wrap: root.code-mode ? no-wrap : word-wrap;
+                font-family: root.code-mode ? CodeEditing.monospace-family : "";
+                font-size: root.code-mode ? 14px : 0px;
+                color: root.coloring ? transparent : Palette.foreground;
+                selection-background-color: root.selection-safe ? Palette.selection-background : transparent;
+                selection-foreground-color: root.selection-safe ? Palette.selection-foreground : Palette.accent-background;
+                page-height: view.visible-height;
+                // The ScrollView of the widget takes care of this.
+                accessible-role: none;
 
-            key-pressed(event) => {
-                if root.var-assist && list.handle(event) { return accept; }
-                if root.can-undo && event.modifiers.control && !event.modifiers.shift && (event.text == "z" || event.text == "\u{1a}") {
+                changed has-focus => {
+                    root.caret-visible = true;
+                    root.tab-navigation = false;
+                    if !self.has-focus { root.can-undo = false; list.dismiss(); }
+                }
+
+                edited => {
+                    root.tab-navigation = false;
                     root.can-undo = false;
-                    self.text = root.undo-text;
-                    self.set-selection-offsets(root.undo-caret, root.undo-caret);
                     root.edited(self.text);
-                    return accept;
+                    if root.var-assist { list.update(self.text, self.cursor-position-byte-offset, false); }
                 }
-                if root.var-assist && event.modifiers.control && event.text == " " {
-                    list.update(self.text, self.cursor-position-byte-offset, true);
-                    return accept;
-                }
-                if event.text == Key.Tab && !event.modifiers.shift {
-                    // Replaces the selection, like any other typed text.
-                    let start = min(self.cursor-position-byte-offset, self.anchor-position-byte-offset);
-                    let end = max(self.cursor-position-byte-offset, self.anchor-position-byte-offset);
-                    self.text = CodeEditing.indent(self.text, start, end);
-                    self.set-selection-offsets(start + CodeEditing.indent-width(), start + CodeEditing.indent-width());
-                    root.edited(self.text);
-                    return accept;
-                }
-                return reject;
-            }
 
-            // Keeps the cursor in view, as the standard TextEdit does.
-            cursor-position-changed(cpos) => {
-                root.cx = cpos.x;
-                root.cy = cpos.y;
-                if (cpos.x + view.content-x < 0px) {
-                    view.content-x = min(0px, max(view.visible-width - self.width, -cpos.x));
-                } else if (cpos.x + view.content-x > view.visible-width) {
-                    view.content-x = min(0px, max(view.visible-width - self.width, view.visible-width - cpos.x));
+                key-pressed(event) => {
+                    if root.read-only { return reject; }
+                    if root.var-assist && list.handle(event) { return accept; }
+                    // Keep keyboard focus navigation available when both Tab directions edit text.
+                    if event.text == Key.Escape { root.tab-navigation = true; return accept; }
+                    if event.text == Key.Tab && root.tab-navigation { return reject; }
+                    if root.can-undo && event.modifiers.control && !event.modifiers.shift && (event.text == "z" || event.text == "\u{1a}") {
+                        root.can-undo = false;
+                        self.text = root.undo-text;
+                        self.set-selection-offsets(root.undo-anchor, root.undo-caret);
+                        root.edited(self.text);
+                        return accept;
+                    }
+                    if root.var-assist && event.modifiers.control && event.text == " " {
+                        list.update(self.text, self.cursor-position-byte-offset, true);
+                        return accept;
+                    }
+                    if root.body-kind != 0 && ((event.modifiers.control && !event.modifiers.alt && (event.text == "v" || event.text == "\u{16}")) || (event.modifiers.shift && event.text == Key.Insert)) {
+                        self.paste();
+                        return accept;
+                    }
+                    if root.body-kind != 0 && event.text == Key.Return && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta {
+                        root.apply(CodeEditing.enter(self.text, self.anchor-position-byte-offset, self.cursor-position-byte-offset, root.body-kind));
+                        return accept;
+                    }
+                    if event.text == Key.Tab && !event.modifiers.control && !event.modifiers.alt {
+                        root.apply(CodeEditing.indent(self.text, self.anchor-position-byte-offset, self.cursor-position-byte-offset, event.modifiers.shift));
+                        return accept;
+                    }
+                    return reject;
                 }
-                if (cpos.y + view.content-y < 0px) {
-                    view.content-y = min(0px, view.visible-height - cpos.y - 20px, max(view.visible-height - self.height, -cpos.y));
-                } else if (cpos.y + view.content-y > view.visible-height - 20px) {
-                    view.content-y = min(0px, max(view.visible-height - self.height, view.visible-height - cpos.y - 20px));
+
+                // Keeps the cursor in view, as the standard TextEdit does.
+                cursor-position-changed(cpos) => {
+                    root.caret-visible = true;
+                    root.cx = cpos.x;
+                    root.cy = cpos.y;
+                    if (cpos.x + view.content-x < 0px) {
+                        view.content-x = min(0px, max(view.visible-width - self.width, -cpos.x));
+                    } else if (cpos.x + view.content-x > view.visible-width) {
+                        view.content-x = min(0px, max(view.visible-width - self.width, view.visible-width - cpos.x));
+                    }
+                    if (cpos.y + view.content-y < 0px) {
+                        view.content-y = min(0px, view.visible-height - cpos.y - 20px, max(view.visible-height - self.height, -cpos.y));
+                    } else if (cpos.y + view.content-y > view.visible-height - 20px) {
+                        view.content-y = min(0px, max(view.visible-height - self.height, view.visible-height - cpos.y - 20px));
+                    }
                 }
+            }
+            // On Linux the native caret inherits the transparent text color.
+            if root.coloring && input.has-focus && !root.read-only && root.caret-visible
+                && input.anchor-position-byte-offset == input.cursor-position-byte-offset: Rectangle {
+                x: root.cx;
+                y: root.cy;
+                width: 1px;
+                height: one-line.preferred-height;
+                background: Palette.foreground;
             }
         }
     }
 
     // Under the line the cursor is on, kept inside the editor.
     list := VarList {
-        x: max(0px, min(root.cx + view.content-x + 8px, root.width - self.width));
+        x: max(root.gutter-width, min(root.cx + view.content-x + 8px + root.gutter-width, root.width - self.width));
         y: min(root.cy + view.content-y + 8px + 22px, root.height - self.height);
         names: root.var-names;
         opened => { input.focus(); }
@@ -114,6 +279,7 @@ export component CodeEdit inherits Rectangle {
             root.undo-text = input.text;
             input.text = VarAssist.insert(input.text, c, name);
             root.undo-caret = VarAssist.caret(input.text, root.undo-text);
+            root.undo-anchor = root.undo-caret;
             root.can-undo = true;
             input.set-selection-offsets(after, after);
             root.edited(input.text);

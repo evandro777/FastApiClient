@@ -1,0 +1,53 @@
+import { Palette } from "std-widgets.slint";
+
+// The pointer is grabbed by TouchArea until release; window coordinates survive moving the handle itself.
+export component Divider inherits Rectangle {
+    in property <bool> vertical;
+    in property <string> label;
+    in property <length> position;
+    callback resize(length);
+    callback reset();
+    private property <length> press-coordinate;
+    private property <length> press-position;
+    forward-focus: keys;
+    accessible-role: slider;
+    accessible-label: root.label;
+    accessible-value: "\{root.position / 1px}";
+    accessible-action-increment => { root.resize(root.position + 8px); }
+    accessible-action-decrement => { root.resize(root.position - 8px); }
+    Rectangle {
+        x: root.vertical ? (parent.width - self.width) / 2 : 0px;
+        y: root.vertical ? 0px : (parent.height - self.height) / 2;
+        width: root.vertical ? 1px : parent.width;
+        height: root.vertical ? parent.height : 1px;
+        background: touch.has-hover || touch.pressed || keys.has-focus ? Palette.accent-background : Palette.border;
+    }
+    keys := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Return { root.reset(); return accept; }
+            if event.text == (root.vertical ? Key.LeftArrow : Key.UpArrow) {
+                root.resize(root.position - 8px); return accept;
+            }
+            if event.text == (root.vertical ? Key.RightArrow : Key.DownArrow) {
+                root.resize(root.position + 8px); return accept;
+            }
+            return reject;
+        }
+        touch := TouchArea {
+            mouse-cursor: root.vertical ? MouseCursor.ew-resize : MouseCursor.ns-resize;
+            pointer-event(event) => {
+                if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                    keys.focus();
+                    root.press-position = root.position;
+                    root.press-coordinate = root.vertical ? self.absolute-position.x + self.mouse-x
+                        : self.absolute-position.y + self.mouse-y;
+                }
+            }
+            moved => {
+                root.resize(root.press-position + (root.vertical ? self.absolute-position.x + self.mouse-x
+                    : self.absolute-position.y + self.mouse-y) - root.press-coordinate);
+            }
+            double-clicked => { root.reset(); }
+        }
+    }
+}

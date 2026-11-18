@@ -25,10 +25,10 @@ export component Transfer inherits Rectangle {
     callback dismiss();
     background: Family.scrim;
 
-    // Swallows clicks so nothing behind the overlay is reachable; a click outside the card closes it.
-    TouchArea { clicked => { root.dismiss(); } }
     // `capture-key-pressed` so Escape works while the path field has the focus.
     keys := FocusScope {
+        // Keep the backdrop inside the focus scope so focused inputs cannot intercept outside clicks.
+        TouchArea { clicked => { root.dismiss(); } }
         capture-key-pressed(event) => {
             if event.text == Key.Escape {
                 root.dismiss();
@@ -107,7 +107,7 @@ export component Transfer inherits Rectangle {
                     checked <=> root.include-values;
                 }
                 if root.exporting && !root.include-values: Text {
-                    text: @tr("Without them the file is safe to share: environment keys stay, their values are emptied, and so are tokens and passwords.");
+                    text: @tr("Only environment values and Auth-tab secrets are removed. Headers, URLs, query parameters and bodies may still contain secrets. Review the file before sharing.");
                     wrap: word-wrap;
                 }
                 if root.message != "": Text {

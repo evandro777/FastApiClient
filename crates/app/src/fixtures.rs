@@ -8,6 +8,14 @@ use fastapiclient_core::{
 
 use crate::Main;
 
+pub fn prompt(ui: &Main) {
+    ui.set_send_prompt_title("Deployment label".into());
+    ui.set_send_prompt_description("Enter the label to include in this request.".into());
+    ui.set_prompt_text("staging".into());
+    ui.set_prompt_kind(9);
+    ui.set_prompt_open(true);
+}
+
 /// 0 empty, 1 single, 2 many, 3 error; `None` when the variable is unset or unknown.
 pub fn mode() -> Option<usize> {
     match std::env::var("FASTAPICLIENT_FIXTURES").ok()?.as_str() {
@@ -162,6 +170,14 @@ fn projects(mode: usize) -> Vec<Project> {
 
 pub fn workspace(mode: usize) -> Workspace {
     let mut ws = Workspace::new(projects(mode));
+    if std::env::var("FASTAPICLIENT_PAGE").as_deref() == Ok("folder-menu") {
+        if ws.projects.is_empty() {
+            ws.add_project("Sample API");
+        }
+        if ws.projects[0].folders.is_empty() {
+            ws.add_folder("Sample folder");
+        }
+    }
     let first_request = ws.projects.first().map(|p| {
         // Many: the first request of the first folder; otherwise the first one directly under the project.
         let folder = (!p.folders.is_empty()).then_some(0);
@@ -223,6 +239,72 @@ pub fn env_error(ui: &Main) {
     ui.set_env_error_detail("EOF while parsing a value at line 2 column 10".into());
 }
 
+/// Payload validation states without reading files or resolving variables.
+pub fn payload(ui: &Main, mode: usize, page: &str) {
+    ui.set_tab(2);
+    if page == "payload-empty" {
+        ui.set_body_type(if mode == 2 { 4 } else { 3 });
+        ui.set_body_text("".into());
+        return;
+    }
+    if mode == 0 {
+        return;
+    }
+    if page == "validation-limit" {
+        ui.set_body_type(3);
+        ui.set_body_text(format!("[0]{}", " ".repeat(fastapiclient_core::http::AUTO_TEXT_LIMIT)).into());
+        return;
+    }
+    if matches!(page, "highlight-json" | "highlight-xml" | "highlight-limit") {
+        let (kind, text) = if page == "highlight-json" {
+            (3, "{\n    \"user\": {\"猫\\\"key\": \"value: \\\"café\\\"\"},\n    \"count\": 12.5,\n    \"flags\": [true, false, null]\n}\n".to_string())
+        } else if page == "highlight-xml" {
+            (
+                4,
+                "<root>\n\t<!-- first\nsecond -->\n\t<user name=\"猫\">na\u{303}o &amp; café</user>\n</root>\n"
+                    .to_string(),
+            )
+        } else {
+            let size = fastapiclient_core::http::AUTO_TEXT_LIMIT + usize::from(mode == 2);
+            let text = format!("[0]{}", " ".repeat(size - 3));
+            (3, text)
+        };
+        ui.set_body_type(kind);
+        ui.set_body_text(text.clone().into());
+        ui.set_has_response(true);
+        crate::highlight::response(ui, &text, "");
+        ui.set_search_open(false);
+        ui.set_has_response(true);
+        ui.set_request_log(SAMPLE_LOG.into());
+        return;
+    }
+    if page == "payload-lines" {
+        let lines = if mode == 1 { 10 } else { 100 };
+        let mut text = String::from("{\n");
+        for n in 2..lines - 1 {
+            text.push_str(&format!("    \"line{n}\": {n},\n"));
+        }
+        text.push_str(&format!("    \"long\": \"{}\"\n}}", "abcdef0123456789".repeat(18)));
+        ui.set_body_type(3);
+        ui.set_body_text(text.into());
+        return;
+    }
+    let (kind, text) = match (page, mode) {
+        ("validation-json", 1) => (3, "{\n    // A comment is accepted\n    \"name\": \"Ana\"\n}"),
+        ("validation-json", 2) => (3, "{\n    \"name\": \"Ana\",\n}"),
+        ("validation-json", _) => (3, "{\n    \"count\": {{count}}\n}"),
+        ("payload-errors", 1) => (3, "{\n    \"name\": \"Ana”\n}"),
+        ("payload-errors", 2) => (3, "{\n    \"name\": \"Ana\tSilva\"\n}"),
+        ("payload-errors", _) => (3, "{\n    \"name\": ”Ana”\n}"),
+        ("validation-xml", 1) => (4, "<user>\n    <name>Ana</name>\n</user>"),
+        ("validation-xml", 2) => (4, "<user>\n    <name>Ana</user>"),
+        ("validation-xml", _) => (4, "<user>{{name}}</user>"),
+        _ => (4, "<!DOCTYPE user SYSTEM \"user.dtd\">\n<user/>"),
+    };
+    ui.set_body_type(kind);
+    ui.set_body_text(text.into());
+}
+
 const SAMPLE_LOG: &str = "> POST https://api.shop.com/users?id=1\n> Authorization: Bearer t0k\n> Content-Type: application/json\n> Content-Length: 15\n\n{\"name\":\"Ana\"}";
 
 /// The response panel is not part of the model, so it is filled on its own.
@@ -234,14 +316,8 @@ pub fn response(ui: &Main, mode: usize) {
             ui.set_reason("OK".into());
             ui.set_time_ms(87);
             ui.set_size_bytes(143);
-            let compact = r#"{"id":1,"name":"Ana","tags":["a","b"],"address":{"city":"Recife","zip":null}}"#;
-            ui.set_response_body(compact.into());
-            ui.set_response_pretty(
-                fastapiclient_core::http::pretty_json(compact)
-                    .unwrap_or_default()
-                    .into(),
-            );
-            ui.set_response_beautify(true);
+            let compact = r#"{"id":1,"data":"Ops, n\u00e3o foi poss\u00edvel realizar essa a\u00e7\u00e3o, tente novamente.","name":"Ana","tags":["a","b"],"address":{"city":"Recife","zip":null}}"#;
+            crate::highlight::response(ui, compact, "application/json");
             ui.set_search_text("a".into());
             ui.set_search_open(true);
             ui.set_request_log(SAMPLE_LOG.into());
@@ -259,7 +335,7 @@ pub fn response(ui: &Main, mode: usize) {
             let lines: Vec<String> = (1..=80)
                 .map(|n| format!("line {n}: not found, and a long tail to check wrapping of text that does not fit"))
                 .collect();
-            ui.set_response_body(lines.join("\n").into());
+            crate::highlight::response(ui, &lines.join("\n"), "text/plain");
             let headers: Vec<String> = (1..=15).map(|n| format!("x-header-{n}: value {n}")).collect();
             ui.set_response_headers(headers.join("\n").into());
         }

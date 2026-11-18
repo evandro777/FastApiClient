@@ -9,7 +9,7 @@ export component EnvEditor inherits Rectangle {
     in-out property <string> text;
     in property <string> error; // already translated; "" when the JSON is fine
     // The text was changed and not saved yet. Rust clears it when it loads or saves; switching or editing the list
-    // of environments is blocked meanwhile, so a draft is never dropped by accident (Close and Escape do drop it).
+    // of environments is blocked meanwhile. Close, Escape and clicking outside discard the draft.
     in-out property <bool> dirty;
     callback picked(int);
     callback edited(string);
@@ -21,10 +21,10 @@ export component EnvEditor inherits Rectangle {
     background: Family.scrim;
     init => { keys.focus(); }
 
-    // Swallows clicks so nothing behind the overlay is reachable; a click outside the card closes it.
-    TouchArea { clicked => { root.dismiss(); } }
     // `capture-key-pressed` so Escape works while the text editor has the focus.
     keys := FocusScope {
+        // Keep the backdrop inside the focus scope so focused inputs cannot intercept outside clicks.
+        TouchArea { clicked => { root.dismiss(); } }
         capture-key-pressed(event) => {
             if event.text == Key.Escape {
                 root.dismiss();

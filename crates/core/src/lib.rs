@@ -4,6 +4,7 @@ pub mod chain;
 pub mod exchange;
 pub mod files;
 pub mod find;
+pub mod format;
 pub mod http;
 pub mod insomnia;
 pub mod model;

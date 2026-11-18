@@ -2,7 +2,7 @@
 use std::{
     collections::HashSet,
     fs,
-    io::{ErrorKind, Write},
+    io::{ErrorKind, Read, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
@@ -16,8 +16,25 @@ use slint::{ComponentHandle, Model};
 
 use crate::{Ctx, ExportRow, Main, flush, refresh, save};
 
-/// A project file is a few kilobytes; this only stops a wrong path (a video, say) from being read into memory.
+/// Bound the read itself: metadata length can be stale or absent.
 const MAX_IMPORT: u64 = 16 * 1024 * 1024;
+
+fn read_import(path: &Path) -> std::io::Result<String> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        // Linux O_NONBLOCK: opening a named pipe must not wait for a writer before we can reject it.
+        .custom_flags(0o4000)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    let mut text = String::new();
+    file.take(MAX_IMPORT + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_IMPORT {
+        return Err(std::io::Error::other("file too large"));
+    }
+    Ok(text)
+}
 
 fn expand(path: &str) -> PathBuf {
     match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
@@ -233,14 +250,8 @@ fn export(ui: &Main, c: &Ctx, dir: &Path) {
 }
 
 /// `from_insomnia`: the file is an Insomnia v5 export instead of a FastApiClient project.
-fn import(ui: &Main, c: &Ctx, path: &PathBuf, from_insomnia: bool) {
-    let read = fs::metadata(path).and_then(|m| {
-        if m.len() > MAX_IMPORT {
-            return Err(std::io::Error::other("file too large"));
-        }
-        fs::read_to_string(path)
-    });
-    let text = match read {
+fn import(ui: &Main, c: &Ctx, path: &Path, from_insomnia: bool) {
+    let text = match read_import(path) {
         Ok(t) => t,
         Err(e) => return report(ui, 6, &e.to_string()),
     };
@@ -258,11 +269,14 @@ fn import(ui: &Main, c: &Ctx, path: &PathBuf, from_insomnia: bool) {
                 for project in projects {
                     let i = app.ws.import_project(project);
                     if app.persist {
-                        save(&app.ws.projects[i]);
+                        save(ui, &mut app, i);
                     }
                 }
             }
             refresh(ui, c, true);
+            if !ui.get_save_error().is_empty() {
+                return report(ui, 5, &ui.get_save_error());
+            }
             // One project is named; several are counted (a file always holds at least one).
             if count == 1 {
                 report(ui, 2, &first);
@@ -273,6 +287,7 @@ fn import(ui: &Main, c: &Ctx, path: &PathBuf, from_insomnia: bool) {
         Err(ImportError::Invalid(d)) => report(ui, if from_insomnia { 11 } else { 8 }, &d),
         Err(ImportError::NotAProject) => report(ui, if from_insomnia { 10 } else { 7 }, ""),
         Err(ImportError::TooNew(_)) => report(ui, 9, ""),
+        Err(ImportError::EnvironmentHeaders) => report(ui, 16, ""),
     }
 }
 
@@ -283,6 +298,38 @@ mod tests {
     use fastapiclient_core::model::new_id;
 
     use super::*;
+
+    #[test]
+    fn import_reads_only_regular_utf8_files_within_the_limit() {
+        let dir = std::env::temp_dir().join(format!("fac-import-{}", new_id()));
+        fs::create_dir(&dir).unwrap();
+        let file = dir.join("project.json");
+        fs::write(&file, "猫").unwrap();
+        assert_eq!(read_import(&file).unwrap(), "猫");
+        fs::write(&file, [0xff]).unwrap();
+        assert_eq!(read_import(&file).unwrap_err().kind(), ErrorKind::InvalidData);
+        fs::write(&file, " ".repeat(MAX_IMPORT as usize)).unwrap();
+        assert_eq!(read_import(&file).unwrap().len(), MAX_IMPORT as usize);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap()
+            .write_all(b"x")
+            .unwrap();
+        assert!(read_import(&file).unwrap_err().to_string().contains("too large"));
+        assert!(read_import(&dir).is_err());
+        assert!(read_import(Path::new("/dev/zero")).is_err());
+        let fifo = dir.join("pipe");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(read_import(&fifo).unwrap_err().to_string().contains("regular file"));
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn suggested_file_names_are_safe() {
