@@ -17,6 +17,10 @@ pub fn send_and_filter(events: &Receiver<Box<dyn FnOnce() + Send>>) {
         generation: Arc::default(),
         responses: Arc::default(),
         dialogs: Arc::default(),
+        progress_timer: Rc::new(RefCell::new(slint::Timer::default())),
+        send_state: Arc::default(),
+        view_key: Arc::default(),
+        cache_epochs: Arc::default(),
     };
     ui.set_tree_rows(c.tree.clone().into());
     wire(&ui, &c, Settings::default());
@@ -76,6 +80,14 @@ pub fn send_and_filter(events: &Receiver<Box<dyn FnOnce() + Send>>) {
                 .expect("Send worker event")();
         }
     };
+    let pump_send_done = |key: &RequestKey| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while c.send_state.lock().unwrap().sends.contains_key(key) {
+            events
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .expect("cancelled Send completion")();
+        }
+    };
     ui.invoke_send();
     pump(&|| ui.get_prompt_open());
     assert_eq!(ui.get_prompt_kind(), 9);
@@ -103,9 +115,12 @@ pub fn send_and_filter(events: &Receiver<Box<dyn FnOnce() + Send>>) {
     assert!(!ui.get_prompt_open());
     assert!(!ui.get_sending());
     ui.invoke_send_prompt_reply(true, "stale".into());
-    events
-        .recv_timeout(Duration::from_secs(10))
-        .expect("cancelled completion")();
+    let first = RequestKey {
+        project: c.app.borrow().ws.projects[0].id.clone(),
+        folder: None,
+        request: 0,
+    };
+    pump_send_done(&first);
     assert_eq!(ui.get_error_kind(), -1);
 
     // A prompt publication already queued when selection changes must never open its dialog.
@@ -114,7 +129,7 @@ pub fn send_and_filter(events: &Receiver<Box<dyn FnOnce() + Send>>) {
     let queued = events.recv_timeout(Duration::from_secs(10)).expect("queued prompt");
     ui.invoke_select(0, -1, 1);
     queued();
-    events.recv_timeout(Duration::from_secs(10)).expect("stale completion")();
+    pump_send_done(&first);
     assert!(!ui.get_prompt_open());
     assert_eq!(ui.get_error_kind(), -1);
 
@@ -124,9 +139,142 @@ pub fn send_and_filter(events: &Receiver<Box<dyn FnOnce() + Send>>) {
     let generation = c.generation.load(Ordering::SeqCst);
     ui.window().dispatch_event(slint::platform::WindowEvent::CloseRequested);
     assert!(c.generation.load(Ordering::SeqCst) > generation);
-    events
+    assert!(c.send_state.lock().unwrap().sends.is_empty());
+}
+
+pub fn request_switch_keeps_responses(events: &Receiver<Box<dyn FnOnce() + Send>>) {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::mpsc,
+    };
+
+    let ui = Main::new().unwrap();
+    let c = Ctx {
+        app: Rc::new(RefCell::new(App {
+            ws: Workspace::new(vec![]),
+            persist: false,
+            dirty: HashSet::new(),
+        })),
+        tables: std::array::from_fn(|_| Rc::new(VecModel::default())),
+        methods: Rc::new(VecModel::default()),
+        tree: Rc::new(VecModel::default()),
+        export_rows: Rc::new(VecModel::default()),
+        generation: Arc::default(),
+        responses: Arc::default(),
+        dialogs: Arc::default(),
+        progress_timer: Rc::new(RefCell::new(slint::Timer::default())),
+        send_state: Arc::default(),
+        view_key: Arc::default(),
+        cache_epochs: Arc::default(),
+    };
+    wire(&ui, &c, Settings::default());
+
+    let start_server = |body: &'static str| {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (started, accepted) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            socket.read_exact(&mut [0; 1]).unwrap();
+            started.send(()).unwrap();
+            wait.recv_timeout(Duration::from_secs(10)).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).unwrap();
+        });
+        (format!("http://{address}"), accepted, release, worker)
+    };
+    let (url_a, accepted_a, release_a, server_a) = start_server(r#"{"id":"A"}"#);
+    let (url_b, accepted_b, release_b, server_b) = start_server(r#"{"id":"B"}"#);
+    let mut project = Project::new("History");
+    project.environments = vec![Environment {
+        name: "Local".into(),
+        values: serde_json::json!({"host":"localhost"}),
+    }];
+    project.active_env = "Local".into();
+    project.requests = [url_a, url_b]
+        .into_iter()
+        .map(|url| fastapiclient_core::model::Request {
+            name: "Same name".into(),
+            url,
+            ..Default::default()
+        })
+        .collect();
+    c.app.borrow_mut().ws = Workspace::new(vec![project]);
+    c.app.borrow_mut().ws.select(Sel {
+        project: 0,
+        folder: None,
+        request: Some(0),
+    });
+    refresh(&ui, &c, true);
+    let key_a = RequestKey {
+        project: c.app.borrow().ws.projects[0].id.clone(),
+        folder: None,
+        request: 0,
+    };
+    let key_b = RequestKey {
+        request: 1,
+        ..key_a.clone()
+    };
+
+    ui.invoke_send();
+    accepted_a
         .recv_timeout(Duration::from_secs(10))
-        .expect("window-close cancellation")();
+        .expect("request A started");
+    ui.invoke_select(0, -1, 1);
+    ui.invoke_send();
+    accepted_b
+        .recv_timeout(Duration::from_secs(10))
+        .expect("request B started concurrently");
+    release_b.send(()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while c.send_state.lock().unwrap().sends.contains_key(&key_b) {
+        events
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .expect("request B completion")();
+    }
+    assert!(ui.get_has_response());
+    assert!(ui.get_response_body().contains("B"));
+
+    ui.invoke_select(0, -1, 0);
+    assert!(ui.get_sending(), "returning to A restores its active Send");
+    release_a.send(()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while c.send_state.lock().unwrap().sends.contains_key(&key_a) {
+        events
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .expect("request A completion")();
+    }
+    assert!(ui.get_has_response());
+    assert!(ui.get_response_body().contains("A"));
+
+    ui.invoke_select(0, -1, 1);
+    assert!(ui.get_has_response());
+    assert!(ui.get_response_body().contains("B"));
+    ui.invoke_env_activated(0);
+    assert!(
+        !ui.get_has_response(),
+        "changing environments invalidates saved responses"
+    );
+    ui.invoke_env_activated(1);
+    assert!(
+        !ui.get_has_response(),
+        "switching back does not revive an invalidated response"
+    );
+    ui.set_url("http://changed.example/".into());
+    flush(&ui, &c);
+    assert!(
+        !ui.get_has_response(),
+        "editing a request invalidates its saved response"
+    );
+    server_a.join().unwrap();
+    server_b.join().unwrap();
 }
 
 fn environment_changes(ui: &Main, c: &Ctx, events: &Receiver<Box<dyn FnOnce() + Send>>) {

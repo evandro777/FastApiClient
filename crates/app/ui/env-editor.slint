@@ -73,6 +73,8 @@ export component EnvEditor inherits Rectangle {
                     vertical-stretch: 1;
                 }
                 if root.names.length > 0: CodeEdit {
+                    body-kind: 3;
+                    highlight-slot: 2;
                     text <=> root.text;
                     edited(t) => { root.dirty = true; root.edited(t); }
                 }

@@ -6,6 +6,10 @@ use std::{
     io::{Cursor, Read},
     os::unix::fs::OpenOptionsExt,
     path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -110,6 +114,38 @@ pub struct Response {
     pub body: Vec<u8>,
     pub truncated: bool,
     pub elapsed: Duration,
+}
+
+/// Stops the active socket for one Send, including dependency refreshes.
+#[derive(Clone, Default)]
+pub struct CancelHandle {
+    cancelled: Arc<AtomicBool>,
+    agent: Arc<Mutex<Option<ureq::Agent>>>,
+}
+
+impl CancelHandle {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        let agent = self.agent.lock().unwrap().clone();
+        if let Some(agent) = agent {
+            agent.shutdown();
+        }
+    }
+
+    fn install(&self, agent: &ureq::Agent) -> Result<(), Error> {
+        let mut active = self.agent.lock().unwrap();
+        if self.cancelled.load(Ordering::SeqCst) {
+            drop(active);
+            agent.clone().shutdown();
+            return Err(Error::Cancelled);
+        }
+        *active = Some(agent.clone());
+        Ok(())
+    }
+
+    fn clear(&self) {
+        self.agent.lock().unwrap().take();
+    }
 }
 
 pub type PromptResolver<'a> = dyn FnMut(&Prompt) -> Result<String, Error> + 'a;
@@ -461,6 +497,10 @@ fn redirect_target(current: &url::Url, location: &str) -> Option<url::Url> {
 }
 
 pub fn send(p: Prepared) -> Result<Response, Error> {
+    send_cancellable(p, &CancelHandle::default())
+}
+
+pub fn send_cancellable(p: Prepared, cancel: &CancelHandle) -> Result<Response, Error> {
     let started = Instant::now();
     let has_body = !matches!(p.payload, Payload::None);
     let mut builder = http::Request::builder().method(p.method.as_str()).uri(p.url.as_str());
@@ -507,6 +547,7 @@ pub fn send(p: Prepared) -> Result<Response, Error> {
         .timeout_global(Some(Duration::from_secs(60)))
         .build();
     let agent = ureq::Agent::new_with_config(config);
+    cancel.install(&agent)?;
     let mut response = match (has_body, forced_builder(&agent, &p.method, &p.url)) {
         (true, Some(mut forced)) => {
             let (parts, body) = request.into_parts();
@@ -517,7 +558,13 @@ pub fn send(p: Prepared) -> Result<Response, Error> {
         }
         _ => agent.run(request),
     }
-    .map_err(|e| Error::Network(e.to_string()))?;
+    .map_err(|e| {
+        if cancel.cancelled.load(Ordering::SeqCst) {
+            Error::Cancelled
+        } else {
+            Error::Network(e.to_string())
+        }
+    })?;
 
     let mut current = url::Url::parse(&p.url).map_err(|_| Error::Url)?;
     let mut method = p.method;
@@ -558,7 +605,13 @@ pub fn send(p: Prepared) -> Result<Response, Error> {
             .configure()
             .timeout_global(Some(remaining))
             .run()
-            .map_err(|e| Error::Network(e.to_string()))?;
+            .map_err(|e| {
+                if cancel.cancelled.load(Ordering::SeqCst) {
+                    Error::Cancelled
+                } else {
+                    Error::Network(e.to_string())
+                }
+            })?;
         current = next;
         body_sent = false;
     }
@@ -576,10 +629,17 @@ pub fn send(p: Prepared) -> Result<Response, Error> {
         .as_reader()
         .take(MAX_BODY as u64 + 1)
         .read_to_end(&mut body)
-        .map_err(|e| Error::Network(e.to_string()))?;
+        .map_err(|e| {
+            if cancel.cancelled.load(Ordering::SeqCst) {
+                Error::Cancelled
+            } else {
+                Error::Network(e.to_string())
+            }
+        })?;
     let truncated = body.len() > MAX_BODY;
     body.truncate(MAX_BODY);
 
+    cancel.clear();
     Ok(Response {
         status: status.as_u16(),
         reason: status.canonical_reason().unwrap_or("").to_string(),
@@ -1179,6 +1239,7 @@ mod tests {
     use std::{
         io::{BufRead, BufReader, Write},
         net::TcpListener,
+        sync::mpsc,
     };
 
     use serde_json::json;
@@ -1222,6 +1283,45 @@ mod tests {
         let response = send(prepare(project, folders, request).unwrap()).unwrap();
         assert_eq!(response.status, 200);
         String::from_utf8(response.body).unwrap()
+    }
+
+    #[test]
+    fn cancel_interrupts_a_blocked_response_read() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_secs(2));
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        });
+        let cancel = CancelHandle::default();
+        let worker_cancel = cancel.clone();
+        let worker = std::thread::spawn(move || {
+            send_cancellable(
+                Prepared {
+                    method: "GET".into(),
+                    url,
+                    headers: vec![],
+                    payload: Payload::None,
+                    missing: vec![],
+                },
+                &worker_cancel,
+            )
+        });
+        rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        cancel.cancel();
+        assert!(matches!(worker.join().unwrap(), Err(Error::Cancelled)));
+        server.join().unwrap();
     }
 
     #[test]

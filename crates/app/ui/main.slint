@@ -250,6 +250,10 @@ export component Main inherits Window {
 
     // The last answer.
     in property <bool> sending: false;
+    in property <int> send-phase: 0; // 1 preparing, 2 prompt, 3 file confirmation, 4 sending
+    in property <string> send-method;
+    in property <string> send-host;
+    in property <int> send-elapsed-ms;
     in property <int> error-kind: -1; // -1 none; otherwise a `Tr.error` kind
     in property <string> error-detail;
     in property <string> error-extra;
@@ -278,6 +282,7 @@ export component Main inherits Window {
     callback open-external(string);
 
     callback send();
+    callback cancel-send();
     // The user agreed to the "send a file" dialog (prompt kind 8).
     callback send-confirmed();
     callback open-website();
@@ -458,10 +463,13 @@ export component Main inherits Window {
                         placeholder-text: @tr("https://example.com/api");
                         accepted => { root.send(); }
                     }
-                    Button {
-                        text: root.sending ? @tr("Sending…") : @tr("Send");
+                    if root.sending: GhostButton {
+                        text: @tr("Cancel request");
+                        clicked => { root.cancel-send(); }
+                    }
+                    if !root.sending: Button {
+                        text: @tr("Send");
                         primary: true;
-                        enabled: !root.sending;
                         clicked => { root.send(); }
                     }
                 }
@@ -668,7 +676,22 @@ export component Main inherits Window {
                                 wrap: word-wrap;
                                 horizontal-stretch: 1;
                             }
-                            if root.error-kind < 0 && root.sending: Text { text: @tr("Waiting for the response…"); }
+                            if root.error-kind < 0 && root.sending: HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: root.send-phase == 2 ? @tr("Waiting for your input…")
+                                        : root.send-phase == 3 ? @tr("Waiting for file confirmation…")
+                                        : root.send-phase == 4 ? @tr("Sending request…")
+                                        : @tr("Preparing request…");
+                                    wrap: word-wrap;
+                                    horizontal-stretch: 1;
+                                }
+                                if root.send-phase == 4: Text {
+                                    text: @tr("{} to {}", root.send-method, root.send-host);
+                                    wrap: word-wrap;
+                                }
+                                Text { text: Tr.ms(root.send-elapsed-ms); }
+                            }
                             if root.error-kind < 0 && !root.sending && !root.has-response: Text {
                                 text: @tr("Send a request (Ctrl+Enter) to see the response here.");
                             }

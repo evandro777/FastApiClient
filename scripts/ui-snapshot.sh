@@ -24,6 +24,7 @@ PAGES[delete-error]=delete-error
 PAGES[import-headers]=import-headers
 PAGES[validation-limit]=validation-limit
 PAGES[response-xml]=response-xml
+PAGES[sending]=sending
 OUT=${OUT:-target/ui-snapshots}
 DISPLAY_NUM=:99
 mkdir -p "$OUT"

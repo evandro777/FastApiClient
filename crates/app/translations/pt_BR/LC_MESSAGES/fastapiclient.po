@@ -288,6 +288,10 @@ msgid "Send"
 msgstr "Enviar"
 
 msgctxt "Main"
+msgid "Cancel request"
+msgstr "Cancelar requisição"
+
+msgctxt "Main"
 msgid "Send a file?"
 msgstr "Enviar um arquivo?"
 
@@ -380,8 +384,24 @@ msgid "Sent in the Authorization header as a Bearer token."
 msgstr "Enviado no cabeçalho Authorization como token Bearer."
 
 msgctxt "Main"
-msgid "Waiting for the response…"
-msgstr "Aguardando a resposta…"
+msgid "Preparing request…"
+msgstr "Preparando requisição…"
+
+msgctxt "Main"
+msgid "Waiting for your input…"
+msgstr "Aguardando sua resposta…"
+
+msgctxt "Main"
+msgid "Waiting for file confirmation…"
+msgstr "Aguardando confirmação do envio do arquivo…"
+
+msgctxt "Main"
+msgid "Sending request…"
+msgstr "Enviando requisição…"
+
+msgctxt "Main"
+msgid "{} to {}"
+msgstr "{} para {}"
 
 msgctxt "Main"
 msgid "Send a request (Ctrl+Enter) to see the response here."

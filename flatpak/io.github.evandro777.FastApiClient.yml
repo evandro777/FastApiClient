@@ -20,6 +20,11 @@ finish-args:
   # So a typed path (a file body to send, an import or export folder) opens as it does in the AppImage; Browse goes
   # through the portal and does not need it.
   - --filesystem=home
+  # The sandbox has no cursor theme, so the resize pointers fall back to the plain arrow. Share the host's themes
+  # (read-only) and point the cursor loader at them; /run/host/share is the host's /usr/share.
+  - --filesystem=xdg-data/icons:ro
+  - --filesystem=~/.icons:ro
+  - --env=XCURSOR_PATH=/run/host/user-share/icons:/run/host/share/icons
 
 modules:
   - name: fastapiclient

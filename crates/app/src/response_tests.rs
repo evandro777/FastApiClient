@@ -178,4 +178,5 @@ fn response_modes_cache_preference_and_stale_publications() {
         assert_eq!(ui.get_response_mode(), 0);
     }
     crate::app_tests::send_and_filter(&publications);
+    crate::app_tests::request_switch_keeps_responses(&publications);
 }

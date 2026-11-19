@@ -9,13 +9,13 @@ use fastapiclient_core::{
 use slint::{Model, ModelRc, SharedString, VecModel};
 use std::{
     cell::RefCell,
-    collections::HashSet,
+    collections::{HashMap, HashSet, VecDeque},
     rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 slint::include_modules!();
@@ -43,6 +43,42 @@ struct App {
     dirty: HashSet<String>,
 }
 
+#[derive(Default)]
+struct SendState {
+    responses: VecDeque<CachedResponse>,
+    sends: HashMap<RequestKey, ActiveSend>,
+    next_send: u64,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct RequestKey {
+    project: String,
+    folder: Option<usize>,
+    request: usize,
+}
+
+struct CachedResponse {
+    key: RequestKey,
+    response: Arc<Response>,
+    request_log: String,
+    warning_vars: String,
+}
+
+struct ActiveSend {
+    serial: u64,
+    started: Instant,
+    phase: i32,
+    method: String,
+    host: String,
+    request_log: String,
+    warning_vars: String,
+    context: Arc<AtomicU64>,
+    cancel: http::CancelHandle,
+}
+
+const RESPONSE_CACHE_BYTES: usize = 32 * 1024 * 1024;
+const RESPONSE_CACHE_ENTRIES: usize = 256;
+
 /// Everything the callbacks share. Cloning is cheap: it only clones the handles.
 #[derive(Clone)]
 struct Ctx {
@@ -52,11 +88,15 @@ struct Ctx {
     tree: Rc<VecModel<TreeRow>>,
     /// The projects of the export dialog, with their checkboxes.
     export_rows: Rc<VecModel<ExportRow>>,
-    /// Bumped whenever the selection changes, so a slow response is not shown under another request.
+    /// View/dialog epoch; switching requests cancels prompts, not background HTTP work.
     generation: Arc<AtomicU64>,
     /// Responses that `{{ $response(...) }}` reads, shared with the sending threads.
     responses: Arc<Responses>,
     dialogs: Arc<sending::Dialogs>,
+    progress_timer: Rc<RefCell<slint::Timer>>,
+    send_state: Arc<std::sync::Mutex<SendState>>,
+    view_key: Arc<std::sync::Mutex<Option<RequestKey>>>,
+    cache_epochs: Arc<std::sync::Mutex<HashMap<String, Arc<AtomicU64>>>>,
 }
 
 fn main() {
@@ -122,6 +162,10 @@ fn main() {
         generation: Arc::new(AtomicU64::new(0)),
         responses: Arc::default(),
         dialogs: Arc::default(),
+        progress_timer: Rc::new(RefCell::new(slint::Timer::default())),
+        send_state: Arc::default(),
+        view_key: Arc::default(),
+        cache_epochs: Arc::default(),
     };
     ui.set_tree_rows(c.tree.clone().into());
     ui.set_export_rows(c.export_rows.clone().into());
@@ -184,6 +228,13 @@ fn main() {
             refresh(&ui, &c, false);
         }
         Ok("prompt") if fixture_run => fixtures::prompt(&ui),
+        Ok("sending") if fixture_run => {
+            ui.set_sending(true);
+            ui.set_send_phase(4);
+            ui.set_send_method("POST".into());
+            ui.set_send_host("api.example.com".into());
+            ui.set_send_elapsed_ms(12_345);
+        }
         Ok("new-folder") if fixture_run => ui.invoke_ask_create(true),
         Ok("new-request") if fixture_run => ui.invoke_ask_create(false),
         Ok("folder-menu") if fixture_run => {
@@ -323,6 +374,19 @@ fn flush(ui: &Main, c: &Ctx) {
         .ws
         .current()
         .is_some_and(|node| editor::store(ui, &c.tables, &c.methods, node));
+    if changed && let Some(sel) = selected {
+        let keys = request_keys_in_scope(&app, sel);
+        remove_response_context(&mut c.send_state.lock().unwrap(), &keys);
+        c.generation.fetch_add(1, Ordering::SeqCst);
+        c.dialogs.cancel();
+        if matches!(ui.get_prompt_kind(), 8 | 9) {
+            ui.set_prompt_open(false);
+        }
+        if let Some(project) = app.ws.projects.get(sel.project) {
+            bump_project_cache_epoch(c, &project.id);
+            c.responses.remove_project(&project.id);
+        }
+    }
     if changed
         && app.persist
         && let Some(sel) = selected
@@ -331,23 +395,170 @@ fn flush(ui: &Main, c: &Ctx) {
         app.dirty.insert(id);
     }
     retry_saves(ui, &mut app, store::save);
+    drop(app);
+    if changed {
+        render_request_view(ui, c);
+    }
+}
+
+fn request_key(app: &App, sel: Sel) -> Option<RequestKey> {
+    let project = app.ws.projects.get(sel.project)?;
+    let request = sel.request?;
+    let requests = match sel.folder {
+        Some(folder) => &project.folders.get(folder)?.requests,
+        None => &project.requests,
+    };
+    (request < requests.len()).then(|| RequestKey {
+        project: project.id.clone(),
+        folder: sel.folder,
+        request,
+    })
+}
+
+fn request_keys_in_project(project: &Project) -> HashSet<RequestKey> {
+    let mut keys = HashSet::new();
+    for request in 0..project.requests.len() {
+        keys.insert(RequestKey {
+            project: project.id.clone(),
+            folder: None,
+            request,
+        });
+    }
+    for (folder, node) in project.folders.iter().enumerate() {
+        for request in 0..node.requests.len() {
+            keys.insert(RequestKey {
+                project: project.id.clone(),
+                folder: Some(folder),
+                request,
+            });
+        }
+    }
+    keys
+}
+
+fn request_keys_in_scope(app: &App, sel: Sel) -> HashSet<RequestKey> {
+    let Some(project) = app.ws.projects.get(sel.project) else {
+        return HashSet::new();
+    };
+    if sel.kind() == Kind::Request {
+        return request_key(app, sel).into_iter().collect();
+    }
+    if sel.kind() == Kind::Project {
+        return request_keys_in_project(project);
+    }
+    let Some(folder) = sel.folder else {
+        return HashSet::new();
+    };
+    project
+        .folders
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| project.folder_chain(*index).contains(&folder))
+        .flat_map(|(index, node)| {
+            (0..node.requests.len()).map(move |request| RequestKey {
+                project: project.id.clone(),
+                folder: Some(index),
+                request,
+            })
+        })
+        .collect()
+}
+
+fn remove_response_context(state: &mut SendState, keys: &HashSet<RequestKey>) {
+    state.responses.retain(|saved| !keys.contains(&saved.key));
+    for key in keys {
+        if let Some(send) = state.sends.remove(key) {
+            send.context.fetch_add(1, Ordering::SeqCst);
+            send.cancel.cancel();
+        }
+    }
+}
+
+fn invalidate_project_context(state: &mut SendState, project: &str) {
+    let keys: HashSet<_> = state
+        .responses
+        .iter()
+        .map(|saved| saved.key.clone())
+        .chain(state.sends.keys().cloned())
+        .filter(|key| key.project == project)
+        .collect();
+    remove_response_context(state, &keys);
+}
+
+fn invalidate_project_responses(c: &Ctx, project: &str) {
+    invalidate_project_context(&mut c.send_state.lock().unwrap(), project);
+    bump_project_cache_epoch(c, project);
+    c.responses.remove_project(project);
+}
+
+fn project_cache_epoch(c: &Ctx, project: &str) -> Arc<AtomicU64> {
+    c.cache_epochs
+        .lock()
+        .unwrap()
+        .entry(project.to_string())
+        .or_default()
+        .clone()
+}
+
+fn bump_project_cache_epoch(c: &Ctx, project: &str) {
+    project_cache_epoch(c, project).fetch_add(1, Ordering::SeqCst);
+}
+
+fn cache_response(
+    state: &mut SendState,
+    key: RequestKey,
+    response: Response,
+    request_log: String,
+    warning_vars: String,
+) {
+    state.responses.retain(|saved| saved.key != key);
+    state.responses.push_back(CachedResponse {
+        key,
+        response: Arc::new(response),
+        request_log,
+        warning_vars,
+    });
+    while state.responses.len() > RESPONSE_CACHE_ENTRIES
+        || state
+            .responses
+            .iter()
+            .map(|saved| saved.response.body.len() + saved.request_log.len() + saved.warning_vars.len())
+            .sum::<usize>()
+            > RESPONSE_CACHE_BYTES
+    {
+        state.responses.pop_front();
+    }
+}
+
+fn take_cached_response(state: &mut SendState, key: &RequestKey) -> Option<(Arc<Response>, String, String)> {
+    let index = state.responses.iter().position(|saved| &saved.key == key)?;
+    let saved = state.responses.remove(index)?;
+    let result = (
+        saved.response.clone(),
+        saved.request_log.clone(),
+        saved.warning_vars.clone(),
+    );
+    state.responses.push_back(saved);
+    Some(result)
 }
 
 /// Keep the selection and its draft intact unless the saved project has actually gone.
 fn delete_project(ui: &Main, app: &mut App, c: &Ctx) -> bool {
     let Some(selected) = app.ws.sel else { return false };
-    let project = &app.ws.projects[selected.project];
+    let id = app.ws.projects[selected.project].id.clone();
     if app.persist
-        && let Err(e) = store::delete(&project.id)
+        && let Err(e) = store::delete(&id)
     {
-        ui.set_failed_delete_project(project.name.clone().into());
+        ui.set_failed_delete_project(app.ws.projects[selected.project].name.clone().into());
         ui.set_delete_error(e.to_string().into());
         return false;
     }
     c.generation.fetch_add(1, Ordering::SeqCst);
     c.dialogs.cancel();
-    c.responses.remove_project(&project.id);
-    app.dirty.remove(&project.id);
+    invalidate_project_context(&mut c.send_state.lock().unwrap(), &id);
+    bump_project_cache_epoch(c, &id);
+    c.responses.remove_project(&id);
+    app.dirty.remove(&id);
     app.ws.select_project(selected.project);
     app.ws.delete();
     ui.set_delete_error("".into());
@@ -366,8 +577,7 @@ fn index(i: Option<usize>) -> i32 {
     i.map_or(-1, |i| i as i32)
 }
 
-/// Rebuilds the sidebar and the selection properties; with `reload`, also puts the selected node in the editor and
-/// forgets the last response (it belonged to another request).
+/// Rebuilds the sidebar and selection properties; with `reload`, also restores the selected request's response.
 fn refresh(ui: &Main, c: &Ctx, reload: bool) {
     let mut app = c.app.borrow_mut();
     let project_id = app
@@ -413,7 +623,6 @@ fn refresh(ui: &Main, c: &Ctx, reload: bool) {
             editor::load(ui, &c.tables, &c.methods, node);
         }
         ui.set_tab(tab);
-        reset_send(ui, c);
     }
     refresh_envs(ui, &app.ws);
     ui.set_project_options(list(app.ws.project_names()));
@@ -421,6 +630,9 @@ fn refresh(ui: &Main, c: &Ctx, reload: bool) {
     ui.set_tree_selected(rows.iter().position(|r| r.selected).map_or(-1, |i| i as i32));
     drop(app);
     sync_tree(&c.tree, rows);
+    if reload {
+        reset_request_view(ui, c);
+    }
 }
 
 /// Updates the rows in place instead of replacing them all: a reset would destroy the row under the pointer, and
@@ -534,33 +746,226 @@ fn open_envs(ui: &Main, c: &Ctx) {
     load_env_text(ui, &app.ws);
 }
 
-fn reset_send(ui: &Main, c: &Ctx) {
+fn reset_request_view(ui: &Main, c: &Ctx) {
     c.generation.fetch_add(1, Ordering::SeqCst);
     c.dialogs.cancel();
     if matches!(ui.get_prompt_kind(), 8 | 9) {
         ui.set_prompt_open(false);
     }
+    render_request_view(ui, c);
+}
+
+fn clear_live_progress(ui: &Main, c: &Ctx) {
+    let mut state = c.send_state.lock().unwrap();
+    for send in state.sends.values() {
+        send.context.fetch_add(1, Ordering::SeqCst);
+    }
+    state.sends.clear();
+    drop(state);
+    c.progress_timer.borrow().stop();
+    clear_live_progress_fields(ui);
+}
+
+fn clear_live_progress_fields(ui: &Main) {
     ui.set_sending(false);
-    highlight::clear_response(ui);
-    ui.set_request_log("".into());
-    ui.set_error_kind(-1);
-    ui.set_warning_vars("".into());
-    ui.set_truncated(false);
+    ui.set_send_phase(0);
+    ui.set_send_method("".into());
+    ui.set_send_host("".into());
+    ui.set_send_elapsed_ms(0);
+}
+
+fn render_request_view(ui: &Main, c: &Ctx) {
+    let (key, any_active) = {
+        let app = c.app.borrow();
+        let state = c.send_state.lock().unwrap();
+        let key = app.ws.sel.and_then(|sel| request_key(&app, sel));
+        (key, !state.sends.is_empty())
+    };
+    *c.view_key.lock().unwrap() = key.clone();
+    if let Some(key) = key.as_ref() {
+        render_request_key(ui, &mut c.send_state.lock().unwrap(), key);
+    } else {
+        clear_live_progress_fields(ui);
+        highlight::clear_response(ui);
+        ui.set_request_log("".into());
+        ui.set_error_kind(-1);
+        ui.set_warning_vars("".into());
+        ui.set_truncated(false);
+    }
+    refresh_progress_timer(ui, c, any_active);
+}
+
+fn render_request_key(ui: &Main, state: &mut SendState, key: &RequestKey) {
+    let active = state.sends.get(key).map(|send| {
+        (
+            send.started,
+            send.phase,
+            send.method.clone(),
+            send.host.clone(),
+            send.request_log.clone(),
+            send.warning_vars.clone(),
+        )
+    });
+    let saved = take_cached_response(state, key);
+    if let Some((started, phase, method, host, request_log, warning_vars)) = active {
+        highlight::clear_response(ui);
+        ui.set_error_kind(-1);
+        ui.set_request_log(request_log.into());
+        ui.set_warning_vars(warning_vars.into());
+        ui.set_sending(true);
+        ui.set_send_phase(phase);
+        ui.set_send_method(method.into());
+        ui.set_send_host(host.into());
+        ui.set_send_elapsed_ms(started.elapsed().as_millis().min(i32::MAX as u128) as i32);
+    } else if let Some((response, request_log, warning_vars)) = saved {
+        clear_live_progress_fields(ui);
+        ui.set_error_kind(-1);
+        ui.set_request_log(request_log.into());
+        ui.set_warning_vars(warning_vars.into());
+        show_response(ui, &response);
+    } else {
+        clear_live_progress_fields(ui);
+        highlight::clear_response(ui);
+        ui.set_request_log("".into());
+        ui.set_error_kind(-1);
+        ui.set_warning_vars("".into());
+        ui.set_truncated(false);
+    }
+}
+
+fn refresh_progress_timer(ui: &Main, c: &Ctx, any_active: bool) {
+    if !any_active {
+        c.progress_timer.borrow().stop();
+        return;
+    }
+    let (weak, app, state, timer) = (
+        ui.as_weak(),
+        c.app.clone(),
+        c.send_state.clone(),
+        Rc::downgrade(&c.progress_timer),
+    );
+    c.progress_timer
+        .borrow_mut()
+        .start(slint::TimerMode::Repeated, Duration::from_millis(100), move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let key = {
+                let app = app.borrow();
+                app.ws.sel.and_then(|sel| request_key(&app, sel))
+            };
+            let (active, any_active) = {
+                let state = state.lock().unwrap();
+                (
+                    key.as_ref()
+                        .and_then(|key| state.sends.get(key))
+                        .map(|send| send.started.elapsed().as_millis().min(i32::MAX as u128) as i32),
+                    !state.sends.is_empty(),
+                )
+            };
+            if let Some(elapsed) = active {
+                ui.set_send_elapsed_ms(elapsed);
+            } else if !any_active && let Some(timer) = timer.upgrade() {
+                timer.borrow().stop();
+            }
+        });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_send_phase(
+    weak: &slint::Weak<Main>,
+    state: &Arc<std::sync::Mutex<SendState>>,
+    view_key: &Arc<std::sync::Mutex<Option<RequestKey>>>,
+    key: &RequestKey,
+    serial: u64,
+    context: &Arc<AtomicU64>,
+    context_generation: u64,
+    phase: i32,
+    method: String,
+    host: String,
+) {
+    let (weak, state, view_key, key, context) = (
+        weak.clone(),
+        state.clone(),
+        view_key.clone(),
+        key.clone(),
+        context.clone(),
+    );
+    let _ = slint::invoke_from_event_loop(move || {
+        if context.load(Ordering::SeqCst) != context_generation {
+            return;
+        }
+        let mut state = state.lock().unwrap();
+        let Some(send) = state.sends.get_mut(&key).filter(|send| send.serial == serial) else {
+            return;
+        };
+        send.phase = phase;
+        send.method = method.clone();
+        send.host = host.clone();
+        drop(state);
+        if *view_key.lock().unwrap() == Some(key)
+            && let Some(ui) = weak.upgrade()
+        {
+            ui.set_send_phase(phase);
+            ui.set_send_method(method.into());
+            ui.set_send_host(host.into());
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_send_details(
+    weak: &slint::Weak<Main>,
+    state: &Arc<std::sync::Mutex<SendState>>,
+    view_key: &Arc<std::sync::Mutex<Option<RequestKey>>>,
+    key: &RequestKey,
+    serial: u64,
+    context: &Arc<AtomicU64>,
+    context_generation: u64,
+    request_log: String,
+    warning_vars: String,
+) {
+    let (weak, state, view_key, key, context) = (
+        weak.clone(),
+        state.clone(),
+        view_key.clone(),
+        key.clone(),
+        context.clone(),
+    );
+    let _ = slint::invoke_from_event_loop(move || {
+        if context.load(Ordering::SeqCst) != context_generation {
+            return;
+        }
+        let mut state = state.lock().unwrap();
+        let Some(send) = state.sends.get_mut(&key).filter(|send| send.serial == serial) else {
+            return;
+        };
+        send.request_log = request_log.clone();
+        send.warning_vars = warning_vars.clone();
+        drop(state);
+        if *view_key.lock().unwrap() == Some(key)
+            && let Some(ui) = weak.upgrade()
+        {
+            ui.set_request_log(request_log.into());
+            ui.set_warning_vars(warning_vars.into());
+        }
+    });
 }
 
 /// Refresh environment lists without reloading the request's unsaved editor values.
 fn env_op(ui: &Main, c: &Ctx, op: impl FnOnce(&mut Workspace, usize) -> Option<usize>) {
     let edit = ui.get_env_edit_index().max(0) as usize;
-    let changed = {
+    let changed_project = {
         let mut app = c.app.borrow_mut();
         let project = op(&mut app.ws, edit);
         if let Some(i) = project.filter(|_| app.persist) {
             save(ui, &mut app, i);
         }
-        project.is_some()
+        project.map(|i| app.ws.projects[i].id.clone())
     };
-    if changed {
-        reset_send(ui, c);
+    if let Some(project) = changed_project {
+        invalidate_project_responses(c, &project);
+        reset_request_view(ui, c);
     }
     refresh_envs(ui, &c.app.borrow().ws);
 }
@@ -658,8 +1063,12 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
             flush(&ui, &c);
             {
                 let mut app = c.app.borrow_mut();
-                if let Some(i) = app.ws.add_folder(name).filter(|_| app.persist) {
-                    save(&ui, &mut app, i);
+                if let Some(i) = app.ws.add_folder(name) {
+                    let project = app.ws.projects[i].id.clone();
+                    invalidate_project_responses(&c, &project);
+                    if app.persist {
+                        save(&ui, &mut app, i);
+                    }
                 }
             }
             refresh(&ui, &c, true);
@@ -676,8 +1085,12 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
             flush(&ui, &c);
             {
                 let mut app = c.app.borrow_mut();
-                if let Some(i) = app.ws.add_request(name).filter(|_| app.persist) {
-                    save(&ui, &mut app, i);
+                if let Some(i) = app.ws.add_request(name) {
+                    let project = app.ws.projects[i].id.clone();
+                    invalidate_project_responses(&c, &project);
+                    if app.persist {
+                        save(&ui, &mut app, i);
+                    }
                 }
             }
             refresh(&ui, &c, true);
@@ -690,11 +1103,16 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
             flush(&ui, &c);
             {
                 let mut app = c.app.borrow_mut();
-                if let Some(i) = app.ws.rename(&name).filter(|_| app.persist) {
-                    save(&ui, &mut app, i);
+                if let Some(i) = app.ws.rename(&name) {
+                    let project = app.ws.projects[i].id.clone();
+                    invalidate_project_responses(&c, &project);
+                    if app.persist {
+                        save(&ui, &mut app, i);
+                    }
                 }
             }
             refresh(&ui, &c, false);
+            reset_request_view(&ui, &c);
         }
     });
     ui.on_rename_project({
@@ -704,6 +1122,8 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
             {
                 let mut app = c.app.borrow_mut();
                 if let Some(i) = app.ws.rename_project(&name).filter(|_| app.persist) {
+                    bump_project_cache_epoch(&c, &app.ws.projects[i].id);
+                    c.responses.remove_project(&app.ws.projects[i].id);
                     save(&ui, &mut app, i);
                 }
             }
@@ -749,10 +1169,20 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
                     if !delete_project(&ui, &mut app, &c) {
                         return;
                     }
-                } else if let Some(Deleted::Part(i)) = app.ws.delete()
-                    && app.persist
-                {
-                    save(&ui, &mut app, i);
+                } else {
+                    let project = app
+                        .ws
+                        .sel
+                        .and_then(|sel| app.ws.projects.get(sel.project))
+                        .map(|project| project.id.clone());
+                    if let Some(project) = project {
+                        invalidate_project_responses(&c, &project);
+                    }
+                    if let Some(Deleted::Part(i)) = app.ws.delete()
+                        && app.persist
+                    {
+                        save(&ui, &mut app, i);
+                    }
                 }
             }
             refresh(&ui, &c, true);
@@ -917,45 +1347,106 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
                 return;
             }
             flush(&ui, &c);
-            // The thread gets its own copy: it may send other requests first, for `{{ $response(...) }}`.
-            let job = c.app.borrow().ws.request_parts().map(|(project, folders, request)| {
-                (
-                    project.clone(),
-                    folders.into_iter().cloned().collect::<Vec<Folder>>(),
-                    request.clone(),
-                )
-            });
-            let Some((project, folders, request)) = job else { return };
-            ui.set_error_kind(-1);
-            highlight::clear_response(&ui);
-            ui.set_request_log("".into());
-            ui.set_warning_vars("".into());
-            ui.set_sending(true);
-            let (weak, generation, responses, dialogs) = (
+            let job = {
+                let app = c.app.borrow();
+                app.ws.sel.and_then(|sel| {
+                    let key = request_key(&app, sel)?;
+                    let (project, folders, request) = app.ws.request_parts()?;
+                    Some((
+                        key,
+                        project.clone(),
+                        folders.into_iter().cloned().collect::<Vec<Folder>>(),
+                        request.clone(),
+                    ))
+                })
+            };
+            let Some((key, project, folders, request)) = job else {
+                return;
+            };
+            let cache_epoch = project_cache_epoch(&c, &project.id);
+            let cache_generation = cache_epoch.load(Ordering::SeqCst);
+            let (serial, context, context_generation, cancel) = {
+                let mut state = c.send_state.lock().unwrap();
+                if state.sends.contains_key(&key) {
+                    return;
+                }
+                state.next_send = state.next_send.wrapping_add(1);
+                let serial = state.next_send;
+                let context = Arc::new(AtomicU64::new(0));
+                let cancel = http::CancelHandle::default();
+                let context_generation = context.load(Ordering::SeqCst);
+                state.sends.insert(
+                    key.clone(),
+                    ActiveSend {
+                        serial,
+                        started: Instant::now(),
+                        phase: 1,
+                        method: String::new(),
+                        host: String::new(),
+                        request_log: String::new(),
+                        warning_vars: String::new(),
+                        context: context.clone(),
+                        cancel: cancel.clone(),
+                    },
+                );
+                (serial, context, context_generation, cancel)
+            };
+            let (weak, view_generation, responses, dialogs, state, view_key) = (
                 weak.clone(),
                 c.generation.clone(),
                 c.responses.clone(),
                 c.dialogs.clone(),
+                c.send_state.clone(),
+                c.view_key.clone(),
             );
-            let started_on = generation.load(Ordering::SeqCst);
+            let started_view = view_generation.load(Ordering::SeqCst);
+            render_request_view(&ui, &c);
             // Blocking work stays off the UI thread; the result comes back through the event loop.
             std::thread::spawn(move || {
-                let responses = responses.for_send(generation.clone(), started_on);
-                let result = chain::prepare_interactive(
+                let responses = responses
+                    .for_send(cache_epoch, cache_generation)
+                    .for_send_with(context.clone(), context_generation);
+                let result = chain::prepare_interactive_with_cancel(
                     &project,
                     &folders.iter().collect::<Vec<_>>(),
                     &request,
                     &responses,
-                    &mut |spec| dialogs.ask(&weak, &generation, started_on, spec.clone(), false),
+                    &mut |spec| {
+                        publish_send_phase(
+                            &weak,
+                            &state,
+                            &view_key,
+                            &key,
+                            serial,
+                            &context,
+                            context_generation,
+                            2,
+                            String::new(),
+                            String::new(),
+                        );
+                        dialogs.ask(&weak, &view_generation, started_view, spec.clone(), false)
+                    },
                     &mut |prepared| {
-                        if generation.load(Ordering::SeqCst) != started_on {
+                        if context.load(Ordering::SeqCst) != context_generation {
                             return Err(Error::Cancelled);
                         }
                         if let http::Payload::File(path) = &prepared.payload {
+                            publish_send_phase(
+                                &weak,
+                                &state,
+                                &view_key,
+                                &key,
+                                serial,
+                                &context,
+                                context_generation,
+                                3,
+                                String::new(),
+                                String::new(),
+                            );
                             dialogs.ask(
                                 &weak,
-                                &generation,
-                                started_on,
+                                &view_generation,
+                                started_view,
                                 fastapiclient_core::resolve::Prompt {
                                     label: path.display().to_string(),
                                     description: prepared.host(),
@@ -964,24 +1455,54 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
                                 true,
                             )?;
                         }
-                        if generation.load(Ordering::SeqCst) != started_on {
+                        if context.load(Ordering::SeqCst) != context_generation {
                             return Err(Error::Cancelled);
                         }
+                        publish_send_phase(
+                            &weak,
+                            &state,
+                            &view_key,
+                            &key,
+                            serial,
+                            &context,
+                            context_generation,
+                            4,
+                            prepared.method.clone(),
+                            prepared.host(),
+                        );
                         Ok(())
                     },
+                    &mut || {
+                        publish_send_phase(
+                            &weak,
+                            &state,
+                            &view_key,
+                            &key,
+                            serial,
+                            &context,
+                            context_generation,
+                            1,
+                            String::new(),
+                            String::new(),
+                        )
+                    },
+                    &cancel,
                 )
                 .and_then(|prepared| {
-                    // Shown now, so the request is visible while it waits for the response.
                     let (log, missing) = (http::request_log(&prepared), prepared.missing.join(", "));
-                    let (ui, generation) = (weak.clone(), generation.clone());
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = ui.upgrade().filter(|_| generation.load(Ordering::SeqCst) == started_on) {
-                            ui.set_warning_vars(missing.into());
-                            ui.set_request_log(log.into());
-                        }
-                    });
+                    publish_send_details(
+                        &weak,
+                        &state,
+                        &view_key,
+                        &key,
+                        serial,
+                        &context,
+                        context_generation,
+                        log,
+                        missing,
+                    );
                     responses.invalidate(&project, &request.name)?;
-                    http::send(prepared)
+                    http::send_cancellable(prepared, &cancel)
                 })
                 .inspect(|r| {
                     // Names can repeat: only the request `$response` would fetch may own the cached value.
@@ -991,13 +1512,27 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
                 });
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(ui) = weak.upgrade() else { return };
-                    if generation.load(Ordering::SeqCst) != started_on {
-                        return; // another request was selected meanwhile
+                    if context.load(Ordering::SeqCst) != context_generation {
+                        return;
                     }
-                    ui.set_sending(false);
-                    match result {
-                        Ok(response) => show_response(&ui, response),
-                        Err(e) => show_error(&ui, e),
+                    let mut state = state.lock().unwrap();
+                    let Some(send) = state.sends.remove(&key).filter(|send| send.serial == serial) else {
+                        return;
+                    };
+                    let error = match result {
+                        Ok(response) => {
+                            cache_response(&mut state, key.clone(), response, send.request_log, send.warning_vars);
+                            None
+                        }
+                        Err(error) => Some(error),
+                    };
+                    let current = *view_key.lock().unwrap() == Some(key.clone());
+                    if current {
+                        render_request_key(&ui, &mut state, &key);
+                    }
+                    drop(state);
+                    if current && let Some(error) = error {
+                        show_error(&ui, error);
                     }
                 });
             });
@@ -1008,6 +1543,28 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
         move |accepted, text| {
             c.dialogs
                 .reply(c.generation.load(Ordering::SeqCst), accepted.then(|| text.to_string()))
+        }
+    });
+    ui.on_cancel_send({
+        let (weak, c) = (ui.as_weak(), c.clone());
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let key = {
+                let app = c.app.borrow();
+                app.ws.sel.and_then(|sel| request_key(&app, sel))
+            };
+            let send = key
+                .as_ref()
+                .and_then(|key| c.send_state.lock().unwrap().sends.remove(key));
+            if let Some(send) = send {
+                send.context.fetch_add(1, Ordering::SeqCst);
+                send.cancel.cancel();
+                c.dialogs.cancel();
+                if matches!(ui.get_prompt_kind(), 8 | 9) {
+                    ui.set_prompt_open(false);
+                }
+                render_request_view(&ui, &c);
+            }
         }
     });
     ui.on_send_confirmed({
@@ -1089,7 +1646,7 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
             c.generation.fetch_add(1, Ordering::SeqCst);
             c.dialogs.cancel();
             if let Some(ui) = weak.upgrade() {
-                ui.set_sending(false);
+                clear_live_progress(&ui, &c);
                 if matches!(ui.get_prompt_kind(), 8 | 9) {
                     ui.set_prompt_open(false);
                 }
@@ -1133,9 +1690,9 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
         .set_size(slint::LogicalSize::new(width as f32, height as f32));
 }
 
-fn show_response(ui: &Main, r: Response) {
+fn show_response(ui: &Main, r: &Response) {
     ui.set_status(r.status.into());
-    ui.set_reason(r.reason.into());
+    ui.set_reason(r.reason.clone().into());
     ui.set_time_ms(r.elapsed.as_millis().min(i32::MAX as u128) as i32);
     ui.set_size_bytes(r.body.len() as i32);
     ui.set_truncated(r.truncated);
@@ -1200,7 +1757,85 @@ fn language(settings: &Settings) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{THEMES, guess_ext, theme_index};
+    use super::*;
+
+    fn response(body: &str) -> Response {
+        Response {
+            status: 200,
+            reason: "OK".into(),
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: body.as_bytes().to_vec(),
+            truncated: false,
+            elapsed: Duration::from_millis(12),
+        }
+    }
+
+    #[test]
+    fn response_history_is_per_request_and_keeps_recent_entries() {
+        let mut state = SendState::default();
+        let a = RequestKey {
+            project: "p".into(),
+            folder: None,
+            request: 0,
+        };
+        let b = RequestKey {
+            request: 1,
+            ..a.clone()
+        };
+        cache_response(&mut state, a.clone(), response("A"), "GET /a".into(), String::new());
+        cache_response(&mut state, b.clone(), response("B"), "GET /b".into(), String::new());
+        assert_eq!(take_cached_response(&mut state, &a).unwrap().0.body, b"A");
+        assert_eq!(take_cached_response(&mut state, &b).unwrap().0.body, b"B");
+
+        for request in 2..=RESPONSE_CACHE_ENTRIES {
+            cache_response(
+                &mut state,
+                RequestKey { request, ..a.clone() },
+                response("x"),
+                String::new(),
+                String::new(),
+            );
+        }
+        assert!(take_cached_response(&mut state, &a).is_none());
+        assert!(take_cached_response(&mut state, &b).is_some());
+        assert_eq!(state.responses.len(), RESPONSE_CACHE_ENTRIES);
+    }
+
+    #[test]
+    fn invalidating_one_request_drops_its_response_and_cancels_its_send() {
+        let mut state = SendState::default();
+        let a = RequestKey {
+            project: "p".into(),
+            folder: Some(0),
+            request: 0,
+        };
+        let b = RequestKey {
+            request: 1,
+            ..a.clone()
+        };
+        cache_response(&mut state, a.clone(), response("A"), String::new(), String::new());
+        cache_response(&mut state, b.clone(), response("B"), String::new(), String::new());
+        let context = Arc::new(AtomicU64::new(0));
+        state.sends.insert(
+            a.clone(),
+            ActiveSend {
+                serial: 1,
+                started: Instant::now(),
+                phase: 1,
+                method: String::new(),
+                host: String::new(),
+                request_log: String::new(),
+                warning_vars: String::new(),
+                context: context.clone(),
+                cancel: http::CancelHandle::default(),
+            },
+        );
+        let removed = HashSet::from([a.clone()]);
+        remove_response_context(&mut state, &removed);
+        assert_eq!(context.load(Ordering::SeqCst), 1);
+        assert!(take_cached_response(&mut state, &a).is_none());
+        assert!(take_cached_response(&mut state, &b).is_some());
+    }
 
     #[test]
     fn themes_and_their_indexes_agree() {

@@ -17,6 +17,7 @@ export global CodeEditing {
     callback highlight(string, int, int);
     in property <ColoredText> request;
     in property <ColoredText> response;
+    in property <ColoredText> environment;
 }
 
 // A multi-line editor for JSON, XML and environment text. It looks like the standard `TextEdit`, but Tab indents
@@ -27,13 +28,14 @@ export component CodeEdit inherits Rectangle {
     // Variables offered after `{{` or Ctrl+Space; empty for the environment editor, which defines them.
     in property <[string]> var-names;
     in property <bool> var-assist: false;
-    // Zero leaves the environment editor's native Enter, wrapping and paste behavior alone.
+    // Zero leaves Enter, wrapping and paste behavior native; nonzero selects JSON or XML code editing.
     in property <int> body-kind;
     in property <bool> read-only: false;
     in property <int> syntax-kind: root.body-kind;
     in property <int> highlight-slot: root.read-only ? 1 : root.body-kind == 0 ? -1 : 0;
     property <bool> code-mode: root.body-kind != 0 || root.syntax-kind != 0;
-    property <ColoredText> colored: root.highlight-slot == 0 ? CodeEditing.request : CodeEditing.response;
+    property <ColoredText> colored: root.highlight-slot == 0 ? CodeEditing.request
+        : root.highlight-slot == 2 ? CodeEditing.environment : CodeEditing.response;
     property <bool> coloring: root.syntax-kind != 0 && root.colored.kind == root.syntax-kind
         && root.colored.source == root.text && input.preedit-text == "";
     property <bool> caret-visible: true;

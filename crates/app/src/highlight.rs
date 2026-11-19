@@ -280,8 +280,8 @@ pub fn clear_response(ui: &Main) {
 }
 
 pub fn wire(ui: &Main) {
-    let pending = Arc::new(Mutex::new([None::<Job>, None]));
-    let revisions = Arc::new([AtomicU64::new(0), AtomicU64::new(0)]);
+    let pending = Arc::new(Mutex::new([None::<Job>, None, None]));
+    let revisions = Arc::new([AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)]);
     let (wake, jobs) = mpsc::sync_channel(1);
     let weak = ui.as_weak();
     std::thread::spawn({
@@ -291,7 +291,7 @@ pub fn wire(ui: &Main) {
             let mut syntaxes = None;
             let theme = theme();
             while jobs.recv().is_ok() {
-                for slot in 0..2 {
+                for slot in 0..3 {
                     let job = pending.lock().unwrap()[slot].take();
                     let Some(job) = job else { continue };
                     if revisions[slot].load(Ordering::Relaxed) != job.revision {
@@ -302,10 +302,10 @@ pub fn wire(ui: &Main) {
                     } else {
                         (job.text, 0)
                     };
-                    let limit = if slot == 0 {
-                        AUTO_TEXT_LIMIT
-                    } else {
+                    let limit = if slot == 1 {
                         MANUAL_OUTPUT_LIMIT
+                    } else {
+                        AUTO_TEXT_LIMIT
                     };
                     let lines = if notice == 2 {
                         vec![]
@@ -323,6 +323,8 @@ pub fn wire(ui: &Main) {
                         let editing = ui.global::<CodeEditing>();
                         if job.slot == 0 {
                             editing.set_request(result);
+                        } else if job.slot == 2 {
+                            editing.set_environment(result);
                         } else {
                             editing.set_response(result);
                             ui.set_response_processing(false);
@@ -371,10 +373,14 @@ pub fn wire(ui: &Main) {
         });
         let _ = response_wake.try_send(());
     });
-    let timers = [slint::Timer::default(), slint::Timer::default()];
+    let timers = [
+        slint::Timer::default(),
+        slint::Timer::default(),
+        slint::Timer::default(),
+    ];
     let weak = ui.as_weak();
     ui.global::<CodeEditing>().on_highlight(move |text, kind, slot| {
-        let Ok(slot @ 0) = usize::try_from(slot) else {
+        let Ok(slot @ (0 | 2)) = usize::try_from(slot) else {
             return;
         };
         let revision = revisions[slot].fetch_add(1, Ordering::Relaxed) + 1;
@@ -383,12 +389,16 @@ pub fn wire(ui: &Main) {
         if !matches!(kind, 3 | 4) || text.is_empty() || !small_text(&text) {
             return;
         }
-        if slot == 0
+        if matches!(slot, 0 | 2)
             && let Some(ui) = weak.upgrade()
         {
             use slint::Model;
             let editing = ui.global::<CodeEditing>();
-            let previous = editing.get_request();
+            let previous = if slot == 0 {
+                editing.get_request()
+            } else {
+                editing.get_environment()
+            };
             if previous.kind == kind && !previous.source.is_empty() && previous.source != text {
                 let lines = previous
                     .lines
@@ -404,7 +414,12 @@ pub fn wire(ui: &Main) {
                     })
                     .collect::<Vec<_>>();
                 let lines = edited_colors(&previous.source, &text, &lines);
-                editing.set_request(colored_text(text.to_string(), kind, lines));
+                let provisional = colored_text(text.to_string(), kind, lines);
+                if slot == 0 {
+                    editing.set_request(provisional);
+                } else {
+                    editing.set_environment(provisional);
+                }
             }
         }
         let (pending, wake) = (pending.clone(), wake.clone());

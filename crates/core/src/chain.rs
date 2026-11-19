@@ -61,7 +61,7 @@ fn cache_usage(cache: &HashMap<String, ProjectResponses>) -> (usize, usize) {
 #[derive(Default)]
 pub struct Responses {
     cache: Arc<Mutex<HashMap<String, ProjectResponses>>>,
-    generation: Option<(Arc<AtomicU64>, u64)>,
+    generations: Vec<(Arc<AtomicU64>, u64)>,
 }
 
 impl Responses {
@@ -69,15 +69,24 @@ impl Responses {
     pub fn for_send(&self, generation: Arc<AtomicU64>, started: u64) -> Self {
         Self {
             cache: self.cache.clone(),
-            generation: Some((generation, started)),
+            generations: vec![(generation, started)],
         }
+    }
+
+    pub fn for_send_with(&self, generation: Arc<AtomicU64>, started: u64) -> Self {
+        let mut send = Self {
+            cache: self.cache.clone(),
+            generations: self.generations.clone(),
+        };
+        send.generations.push((generation, started));
+        send
     }
 
     fn check_current(&self) -> Result<(), Error> {
         if self
-            .generation
-            .as_ref()
-            .is_some_and(|(generation, started)| generation.load(Ordering::SeqCst) != *started)
+            .generations
+            .iter()
+            .any(|(generation, started)| generation.load(Ordering::SeqCst) != *started)
         {
             return Err(Error::Cancelled);
         }
@@ -233,6 +242,7 @@ pub fn prepare(
     request: &Request,
     cache: &Responses,
 ) -> Result<Prepared, Error> {
+    let cancel = http::CancelHandle::default();
     prepare_at(
         project,
         folders,
@@ -241,6 +251,8 @@ pub fn prepare(
         &mut Preparation::default(),
         &mut None,
         &mut |_| Ok(()),
+        &mut || {},
+        &cancel,
     )
 }
 
@@ -252,6 +264,43 @@ pub fn prepare_interactive(
     cache: &Responses,
     prompt: &mut dyn FnMut(&Prompt) -> Result<String, Error>,
     before_send: &mut dyn FnMut(&Prepared) -> Result<(), Error>,
+) -> Result<Prepared, Error> {
+    prepare_interactive_with_progress(project, folders, request, cache, prompt, before_send, &mut || {})
+}
+
+/// The progress callback runs before each preparation pass, including dependency requests.
+pub fn prepare_interactive_with_progress(
+    project: &Project,
+    folders: &[&Folder],
+    request: &Request,
+    cache: &Responses,
+    prompt: &mut dyn FnMut(&Prompt) -> Result<String, Error>,
+    before_send: &mut dyn FnMut(&Prepared) -> Result<(), Error>,
+    progress: &mut dyn FnMut(),
+) -> Result<Prepared, Error> {
+    prepare_interactive_with_cancel(
+        project,
+        folders,
+        request,
+        cache,
+        prompt,
+        before_send,
+        progress,
+        &http::CancelHandle::default(),
+    )
+}
+
+/// Like `prepare_interactive_with_progress`, while allowing the caller to interrupt dependency requests.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_interactive_with_cancel(
+    project: &Project,
+    folders: &[&Folder],
+    request: &Request,
+    cache: &Responses,
+    prompt: &mut dyn FnMut(&Prompt) -> Result<String, Error>,
+    before_send: &mut dyn FnMut(&Prepared) -> Result<(), Error>,
+    progress: &mut dyn FnMut(),
+    cancel: &http::CancelHandle,
 ) -> Result<Prepared, Error> {
     let mut answers = HashMap::new();
     let mut cached = |spec: &Prompt| {
@@ -270,11 +319,14 @@ pub fn prepare_interactive(
         &mut Preparation::default(),
         &mut Some(&mut cached),
         before_send,
+        progress,
+        cancel,
     )?;
     before_send(&prepared)?;
     Ok(prepared)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_at(
     project: &Project,
     folders: &[&Folder],
@@ -283,9 +335,12 @@ fn prepare_at(
     state: &mut Preparation,
     prompt: &mut Option<&mut http::PromptResolver<'_>>,
     before_send: &mut dyn FnMut(&Prepared) -> Result<(), Error>,
+    progress: &mut dyn FnMut(),
+    cancel: &http::CancelHandle,
 ) -> Result<Prepared, Error> {
     loop {
         cache.check_current()?;
+        progress();
         let (first, stale) = http::prepare_interactive(
             project,
             folders,
@@ -315,11 +370,21 @@ fn prepare_at(
         // A failed refresh (including network errors or cancellation) must not leave a reusable old value.
         cache.invalidate(project, &name)?;
         state.depth += 1;
-        let prepared = prepare_at(project, &parents, dependency, cache, state, prompt, before_send);
+        let prepared = prepare_at(
+            project,
+            &parents,
+            dependency,
+            cache,
+            state,
+            prompt,
+            before_send,
+            progress,
+            cancel,
+        );
         state.depth -= 1;
         let response = prepared.and_then(|p| {
             before_send(&p)?;
-            http::send(p)
+            http::send_cancellable(p, cancel)
         });
         cache.check_current()?;
         let response = response.map_err(failed)?;
@@ -810,6 +875,24 @@ mod tests {
             assert_eq!(bearer(&run(&p, name, &cache).unwrap()), Some("Bearer abc"));
         }
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn progress_runs_for_dependency_and_final_preparation() {
+        let (host, _) = server("200 OK", r#"{"access_token":"abc","expires_in":3600}"#);
+        let (project, cache) = (project(&host, ""), Responses::default());
+        let mut passes = 0;
+        prepare_interactive_with_progress(
+            &project,
+            &[],
+            project.find_request("Once").unwrap().1,
+            &cache,
+            &mut |_| panic!("no prompt expected"),
+            &mut |_| Ok(()),
+            &mut || passes += 1,
+        )
+        .unwrap();
+        assert_eq!(passes, 3);
     }
 
     #[test]
