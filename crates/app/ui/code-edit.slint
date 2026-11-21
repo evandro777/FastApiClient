@@ -13,7 +13,6 @@ export global CodeEditing {
     pure callback enter(string, int, int, int) -> CodeChange;
     pure callback format(string, int) -> string;
     pure callback line-numbers(string) -> string;
-    pure callback selection-safe(float, int, int) -> bool;
     callback highlight(string, int, int);
     in property <ColoredText> request;
     in property <ColoredText> response;
@@ -39,9 +38,6 @@ export component CodeEdit inherits Rectangle {
     property <bool> coloring: root.syntax-kind != 0 && root.colored.kind == root.syntax-kind
         && root.colored.source == root.text && input.preedit-text == "";
     property <bool> caret-visible: true;
-    // Slint 1.18 casts native selection rectangles to i16 before clipping them.
-    property <bool> selection-safe: !root.code-mode || CodeEditing.selection-safe(input.preferred-width / 1px,
-        input.anchor-position-byte-offset, input.cursor-position-byte-offset);
     property <length> line-height: two-lines.preferred-height - one-line.preferred-height;
     property <int> first-line: max(0, floor(-view.content-y / root.line-height));
     property <int> visible-lines: ceil(view.visible-height / root.line-height) + 1;
@@ -189,8 +185,8 @@ export component CodeEdit inherits Rectangle {
                 font-family: root.code-mode ? CodeEditing.monospace-family : "";
                 font-size: root.code-mode ? 14px : 0px;
                 color: root.coloring ? transparent : Palette.foreground;
-                selection-background-color: root.selection-safe ? Palette.selection-background : transparent;
-                selection-foreground-color: root.selection-safe ? Palette.selection-foreground : Palette.accent-background;
+                selection-background-color: Palette.selection-background;
+                selection-foreground-color: Palette.selection-foreground;
                 page-height: view.visible-height;
                 // The ScrollView of the widget takes care of this.
                 accessible-role: none;

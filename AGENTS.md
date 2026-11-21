@@ -57,8 +57,6 @@ System deps: `libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-dev
 
 - Clear responses through `highlight::clear_response` when changing requests or starting Send. It invalidates worker results synchronously; a Slint `changed has-response` handler runs too late to reject an already queued publication. `response_tests.rs` holds publications to verify these races without X11.
 
-- Slint 1.18's software renderer casts selection rectangles to i16 before clipping: selecting an unwrapped line wider than 32,767 physical pixels panics. `CodeEditing.selection-safe` disables the native background for those lines and uses accent-colored selected glyphs; source text, byte offsets and clipboard operations stay native. Remove this workaround when the renderer clips before casting.
-
 - While waiting for request highlighting, `highlight::edited_colors` splices the current text into the previous token colors at UTF-8 boundaries. Keep its `ColoredText.source` synchronized with the native input: merely displaying the old colored text after an edit hides or misaligns the characters just typed. Background parsing corrects provisional colors after the debounce.
 
 - Syntect's bundled JSON grammar marks keys with `meta.structure.dictionary.key.json`; match its nested `string` scope to override generic string coloring. Token roles are shared by both editors; the VS Code Dark+ / Light+ palette in `code-edit.slint` reacts to appearance changes without reparsing.
@@ -129,7 +127,7 @@ Release gotchas (each one broke a first release):
 
 ## Flatpak
 
-App id `io.github.evandro777.FastApiClient`; `flatpak/build.sh --devel` installs `...FastApiClient.Devel` next to a release. Needs `flatpak-builder` and `org.freedesktop.Sdk//25.08` + `org.freedesktop.Sdk.Extension.rust-stable//25.08`. The runtime version `25.08` appears in five places (the manifest, the container image tag, the rust-stable install and its `GITHUB_PATH` line in `flatpak.yml`, and the header of `flatpak/build.sh`): bump them together.
+App id `io.github.evandro777.FastApiClient`; `flatpak/build.sh --devel` installs `...FastApiClient.Devel` next to a release. Needs `flatpak-builder` and `org.freedesktop.Sdk//26.08` + `org.freedesktop.Sdk.Extension.rust-stable//26.08`. The runtime version `26.08` appears in five places (the manifest, the container image tag, the rust-stable install and its `GITHUB_PATH` line in `flatpak.yml`, and the header of `flatpak/build.sh`): bump them together.
 
 - Auto-update = our own signed OSTree remote on GitHub Pages (`flatpak.yml`: `bundle` → `pages` → `release`), deployed on `v*` tags only. Every deploy replaces the whole site, so never deploy Pages from another trigger. The public key is `flatpak/signing-key.b64` (base64 of the binary export, made by `flatpak/new-signing-key.sh`; the template ships none); the private half is the secret `FLATPAK_GPG_PRIVATE_KEY`. See `docs/FLATPAK-SIGNING.md`.
 - Keep `finish-args` minimal (the manifest says how for X11-only apps and trays). The build vendors crates (`cargo vendor`), so `flatpak/vendor` must not be in the manifest's `skip:`.

@@ -58,7 +58,7 @@ jobs:
           sudo apt-get install -y libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libxcb1-dev
 
       # Keep in step with `rust-version` in Cargo.toml.
-      - uses: dtolnay/rust-toolchain@3334128f4a3bea6d0d6718ee50ff473f7f275e31 # 1.92
+      - uses: dtolnay/rust-toolchain@1961bfc0c4a8bf07e0a0c98e1e2459c642ea70a0 # 1.95
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 

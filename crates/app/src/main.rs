@@ -1258,9 +1258,9 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
     });
     let code_editing = ui.global::<CodeEditing>();
     // The software renderer treats "monospace" as a literal name; resolve the system's generic family first.
-    let mut fonts = slint::fontique_011::shared_collection();
+    let mut fonts = slint::fontique_012::shared_collection();
     let mono = fonts
-        .generic_families(slint::fontique_011::fontique::GenericFamily::Monospace)
+        .generic_families(slint::fontique_012::fontique::GenericFamily::Monospace)
         .next();
     if let Some(family) = mono {
         code_editing.set_monospace_family(fonts.family_name(family).unwrap_or("DejaVu Sans Mono").into());
@@ -1273,14 +1273,6 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
     });
     code_editing.on_format(|text, kind| payload::format(&text, kind).into());
     code_editing.on_line_numbers(|text| editor::line_numbers(&text).into());
-    code_editing.on_selection_safe({
-        let weak = ui.as_weak();
-        // Selection offsets also invalidate the binding after a move to a different monitor.
-        move |width, _, _| {
-            weak.upgrade()
-                .is_some_and(|ui| width * ui.window().scale_factor() < 32_000.0)
-        }
-    });
     let validation_timer = slint::Timer::default();
     ui.on_validate_body({
         let weak = ui.as_weak();

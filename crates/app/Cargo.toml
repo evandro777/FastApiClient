@@ -16,7 +16,7 @@ syntect = { version = "5.3", default-features = false, features = ["parsing", "d
 # The file chooser of the import dialog, through the xdg-desktop-portal (works inside the Flatpak). No GTK, no wayland
 # parent-window support: the dialog is not modal, which is fine here.
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
-slint = { version = "1.18", default-features = false, features = ["std", "backend-winit", "renderer-software", "software-renderer-systemfonts", "compat-1-2", "unstable-winit-030", "unstable-fontique-011"] }
+slint = { version = "1.19", default-features = false, features = ["std", "backend-winit", "renderer-software", "software-renderer-systemfonts", "compat-1-2", "unstable-winit-030", "unstable-fontique-012"] }
 
 [build-dependencies]
-slint-build = "1.18"
+slint-build = "1.19"

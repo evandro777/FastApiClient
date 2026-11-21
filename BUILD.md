@@ -44,7 +44,7 @@ App id: `io.github.evandro777.FastApiClient`.
 
 ```bash
 sudo apt install flatpak-builder
-flatpak install --user flathub org.freedesktop.Sdk//25.08 org.freedesktop.Sdk.Extension.rust-stable//25.08
+flatpak install --user flathub org.freedesktop.Sdk//26.08 org.freedesktop.Sdk.Extension.rust-stable//26.08
 flatpak/build.sh --devel      # installs io.github.evandro777.FastApiClient.Devel next to a release
 flatpak run io.github.evandro777.FastApiClient.Devel
 ```
@@ -107,8 +107,6 @@ Request filtering uses `Workspace::filtered_tree` for rendering and arrow naviga
 Request/folder creation uses Prompt kinds 10/11, shared by sidebar and folder context actions. Opening or dismissing the prompt leaves workspace selection and editor contents intact. Confirmation trims the name and rejects blanks before flushing the editor, creating, saving and selecting one item. Placement follows the selected folder (including nested folders), or the project when no folder is selected; Rename/F2 stays separate. Snapshot pages `new-folder`, `new-request` and `folder-menu` show the dialogs and folder actions. After a debug build, `python3 dev/check-creation.py` checks dismissal, confirmation, saved edits, placement and Rename/F2/Delete on private Xvfb with temporary projects and pointer targets derived from OCR/pixels; `--menus` skips the dismissal checks.
 
 `$prompt('Label', 'Description', 'Default')` accepts one to three quoted strings and resolves only during Send. `chain::prepare_interactive` caches answers by the full parsed tuple across preparation passes and dependencies; noninteractive preparation leaves prompts unresolved. The worker bridges questions and resolved file confirmations through the Slint event loop and reply channels (`sending.rs`). Cancel or selection/window changes drop pending replies and stop remaining work without a network error. Answers are inserted literally, never saved or recursively evaluated. Insomnia literal prompt tags convert title/label/default with ordinary default options; storage keys, masking and unsupported variants remain untouched. No settings migration or cross-session prompt storage is used.
-
-On extremely long unwrapped lines (32,000 physical pixels or more), selection uses accent-colored text without a filled background to avoid a Slint 1.18 software-renderer overflow. Copy and selection offsets are unchanged.
 
 In payloads, press Escape first to move focus out with Tab or Shift+Tab (close variable suggestions first if open); in environments, Escape closes the dialog. These behaviors need no new settings.
 
