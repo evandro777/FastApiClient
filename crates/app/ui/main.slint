@@ -150,6 +150,30 @@ component About inherits Rectangle {
     }
 }
 
+// Shown instead of Main when the settings cannot be loaded safely: a desktop launch has no terminal to print to.
+export component StartupError inherits Window {
+    in property <string> detail;
+    callback dismiss();
+    title: "FastApiClient";
+    preferred-width: 480px;
+    preferred-height: 180px;
+    background: Palette.background;
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+        Text {
+            text: @tr("FastApiClient could not load its settings safely: {}. Your files were not changed. Fix the problem and start the app again.", root.detail);
+            color: Family.danger;
+            wrap: word-wrap;
+            vertical-stretch: 1;
+        }
+        HorizontalLayout {
+            alignment: end;
+            Button { text: @tr("Close"); primary: true; clicked => { root.dismiss(); } }
+        }
+    }
+}
+
 export component Main inherits Window {
     in property <string> version;
     in-out property <bool> about-open: false;
@@ -186,6 +210,8 @@ export component Main inherits Window {
     in property <string> save-error;
     in property <string> failed-delete-project;
     in property <string> delete-error;
+    // Names of project files that exist but could not be read (see store::load_all).
+    in property <string> load-error;
     in-out property <bool> prompt-open: false;
     // 0 rename the selection, 1 delete it, 2 new environment, 3 rename environment, 4 delete environment, 5 new
     // project, 6 rename project, 7 delete project, 8 confirm sending a file, 9 Send prompt, 10 new folder, 11 new request
@@ -422,6 +448,11 @@ export component Main inherits Window {
             }
             if root.delete-error != "": Text {
                 text: @tr("Could not delete project \"{}\": {}. The project was kept; try deleting it again after fixing the error.", root.failed-delete-project, root.delete-error);
+                color: Family.danger;
+                wrap: word-wrap;
+            }
+            if root.load-error != "": Text {
+                text: @tr("Could not read: {}. The files were left where they are, so nothing was lost. Fix their permissions and restart the app.", root.load-error);
                 color: Family.danger;
                 wrap: word-wrap;
             }

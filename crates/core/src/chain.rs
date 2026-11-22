@@ -19,8 +19,9 @@ use crate::{
 
 /// How many requests may wait on one another before it is taken for a loop.
 const MAX_DEPTH: usize = 4;
-const CACHE_BYTES: usize = 32 * 1024 * 1024;
-const CACHE_ENTRIES: usize = 256;
+/// Also the limits of the app's response history, so both caches stay in step.
+pub const CACHE_BYTES: usize = 32 * 1024 * 1024;
+pub const CACHE_ENTRIES: usize = 256;
 
 #[derive(Default)]
 struct Preparation {

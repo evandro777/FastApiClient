@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::{Auth, Body, Project, new_id};
+use crate::model::{Auth, Body, KeyValue, Project, new_id};
 
 const FORMAT: &str = "fastapiclient-project";
 /// Version 1 holds one project (`project`); version 2 holds all of them (`projects`). A single export stays version
@@ -55,19 +55,35 @@ fn strip_secrets(auth: &mut Auth) {
     }
 }
 
-/// Clears environment values and Auth secrets only. Headers, URLs, queries and bodies still need review.
+/// Blanks the value of headers that usually carry credentials (`Authorization`, `X-API-Key`, cookies...).
+fn strip_header_secrets(headers: &mut [KeyValue]) {
+    // Broad on purpose ("auth", "key"): blanking a harmless `Idempotency-Key` is cheaper than leaking `X-Auth`.
+    const HINTS: [&str; 6] = ["auth", "cookie", "token", "secret", "password", "key"];
+    for header in headers {
+        let name = header.key.to_ascii_lowercase();
+        if HINTS.iter().any(|hint| name.contains(hint)) {
+            header.value.clear();
+        }
+    }
+}
+
+/// Clears environment values, Auth secrets and the values of credential-like headers. Other headers, URLs, queries and
+/// bodies still need review.
 fn without_secrets(project: &Project) -> Project {
     let mut project = project.clone();
     for env in &mut project.environments {
         env.values = blank(&env.values);
     }
     strip_secrets(&mut project.auth);
+    strip_header_secrets(&mut project.headers);
     for folder in &mut project.folders {
         strip_secrets(&mut folder.auth);
+        strip_header_secrets(&mut folder.headers);
     }
     let in_folders = project.folders.iter_mut().flat_map(|f| f.requests.iter_mut());
     for request in project.requests.iter_mut().chain(in_folders) {
         strip_secrets(&mut request.auth);
+        strip_header_secrets(&mut request.headers);
     }
     project
 }
@@ -189,7 +205,12 @@ mod tests {
             }),
             requests: vec![Request {
                 name: "in-folder".into(),
-                headers: vec![KeyValue::new("X-A", "1")],
+                headers: vec![
+                    KeyValue::new("X-A", "1"),
+                    KeyValue::new("Authorization", "Bearer hdr-secret"),
+                    KeyValue::new("X-Auth", "xauth-secret"),
+                    KeyValue::new("Api_Key", "underscore-secret"),
+                ],
                 auth: Auth::Basic(Basic {
                     username: "ana".into(),
                     password: "hunter2".into(),
@@ -229,6 +250,9 @@ mod tests {
             "project-token",
             "request-token",
             "hunter2",
+            "hdr-secret",
+            "xauth-secret",
+            "underscore-secret",
             "shh",
             "\"pw\"",
         ] {
@@ -249,15 +273,17 @@ mod tests {
     }
 
     #[test]
-    fn imported_api_keys_remain_literal_fields_that_need_review() {
+    fn imported_api_key_headers_are_blanked_in_a_values_free_export() {
         let source = json!({"type": "collection.insomnia.rest/5.0", "collection": [
             {"name": "API", "method": "GET", "url": "http://unused", "authentication": {
                 "type": "apikey", "key": "X-API-Key", "value": "literal-secret", "addTo": "header"}}
         ]});
         let project = crate::insomnia::import(&source.to_string()).unwrap();
         let text = export(&project, false);
-        assert!(text.contains("literal-secret"));
-        assert_eq!(import(&text).unwrap()[0].requests[0].headers[0].value, "literal-secret");
+        assert!(!text.contains("literal-secret"));
+        let back = &import(&text).unwrap()[0].requests[0].headers[0];
+        assert_eq!((back.key.as_str(), back.value.as_str()), ("X-API-Key", ""));
+        assert!(export(&project, true).contains("literal-secret"));
     }
 
     #[test]

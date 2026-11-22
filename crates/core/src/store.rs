@@ -22,7 +22,8 @@ pub fn save(project: &Project) -> io::Result<()> {
     save_in(&projects_dir(), project)
 }
 
-pub fn load_all() -> Vec<Project> {
+/// The projects, and the names of files that exist but could not be read (left in place; the caller tells the user).
+pub fn load_all() -> (Vec<Project>, Vec<String>) {
     load_all_in(&projects_dir())
 }
 
@@ -40,19 +41,28 @@ fn save_in(dir: &Path, project: &Project) -> io::Result<()> {
 }
 
 /// Sorted by name. An unreadable file is renamed to `.bad` (never overwritten, never silently dropped) and skipped.
-fn load_all_in(dir: &Path) -> Vec<Project> {
+fn load_all_in(dir: &Path) -> (Vec<Project>, Vec<String>) {
     // Projects hold tokens and passwords: a folder made by an older version (0755) is closed to other users now.
     let _ = create_private_dir(dir);
-    let Ok(entries) = fs::read_dir(dir) else { return vec![] };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return (vec![], vec![]);
+    };
     remove_dead_temp_files(dir);
+    let mut unreadable = vec![];
     let mut out: Vec<Project> = entries
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .filter_map(|path| {
-            let parsed = fs::read_to_string(&path)
+            // A read error (permissions, I/O) is not proof the file is bad: leave it in place instead of hiding it.
+            let text = fs::read_to_string(&path)
+                .inspect_err(|e| {
+                    eprintln!("cannot read {}: {e}", path.display());
+                    unreadable.push(path.file_name().unwrap_or_default().to_string_lossy().into_owned());
+                })
+                .ok()?;
+            let parsed = serde_json::from_str::<Project>(&text)
                 .map_err(|e| e.to_string())
-                .and_then(|t| serde_json::from_str::<Project>(&t).map_err(|e| e.to_string()))
                 // The file name is the source of truth, so a hand-edited `id` cannot point elsewhere.
                 .map(|mut p| {
                     p.id = path
@@ -79,7 +89,8 @@ fn load_all_in(dir: &Path) -> Vec<Project> {
         })
         .collect();
     out.sort_by_key(|p| p.name.to_lowercase());
-    out
+    unreadable.sort();
+    (out, unreadable)
 }
 
 /// `<name>.<pid>.tmp` is left by a process that died between write and rename; one whose process still runs is a
@@ -123,11 +134,11 @@ mod tests {
         let (b, a) = (Project::new("beta"), Project::new("Alpha"));
         save_in(&dir, &b).unwrap();
         save_in(&dir, &a).unwrap();
-        let names: Vec<_> = load_all_in(&dir).into_iter().map(|p| p.name).collect();
+        let names: Vec<_> = load_all_in(&dir).0.into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["Alpha", "beta"]);
         delete_in(&dir, &a.id).unwrap();
         delete_in(&dir, &a.id).unwrap(); // Already absent is still deleted.
-        assert_eq!(load_all_in(&dir).len(), 1);
+        assert_eq!(load_all_in(&dir).0.len(), 1);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -145,7 +156,7 @@ mod tests {
             .collect();
         p.active_env = "Shared".into();
         save_in(&dir, &p).unwrap();
-        let loaded = load_all_in(&dir);
+        let loaded = load_all_in(&dir).0;
         assert_eq!(
             loaded[0]
                 .environments
@@ -164,7 +175,7 @@ mod tests {
         let dir = temp_dir();
         save_in(&dir, &Project::new("ok")).unwrap();
         fs::write(dir.join("broken.json"), "{not json").unwrap();
-        assert_eq!(load_all_in(&dir).len(), 1);
+        assert_eq!(load_all_in(&dir).0.len(), 1);
         let kept = |dir: &Path| {
             fs::read_dir(dir)
                 .unwrap()
@@ -176,6 +187,18 @@ mod tests {
         fs::write(dir.join("broken.json"), "{still not json").unwrap();
         load_all_in(&dir);
         assert_eq!(kept(&dir), 2, "a second bad file does not replace the first");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_file_is_left_in_place_not_renamed() {
+        let dir = temp_dir();
+        // A directory named like a project fails to read, as a permission or I/O error would.
+        fs::create_dir(dir.join("x.json")).unwrap();
+        let (projects, unreadable) = load_all_in(&dir);
+        assert!(projects.is_empty());
+        assert_eq!(unreadable, ["x.json"], "reported so the app can tell the user");
+        assert!(dir.join("x.json").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 

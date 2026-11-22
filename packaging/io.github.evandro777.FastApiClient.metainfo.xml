@@ -27,6 +27,11 @@
   <launchable type="desktop-id">io.github.evandro777.FastApiClient.desktop</launchable>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.3.1" date="2026-11-22">
+      <description>
+        <p>Errors are now visible; exports hide more secrets; Send code reorganised.</p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-11-21">
       <description>
         <p>Updated the UI toolkit to Slint 1.19: faster start, and fewer redundant redraws on X11.</p>

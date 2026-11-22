@@ -71,6 +71,18 @@ msgctxt "Main"
 msgid "Could not delete project \"{}\": {}. The project was kept; try deleting it again after fixing the error."
 msgstr "Não foi possível excluir o projeto \"{}\": {}. O projeto foi mantido; tente excluí-lo novamente após corrigir o erro."
 
+msgctxt "Main"
+msgid "Could not read: {}. The files were left where they are, so nothing was lost. Fix their permissions and restart the app."
+msgstr "Não foi possível ler: {}. Os arquivos foram mantidos onde estão, então nada foi perdido. Corrija as permissões e reinicie o app."
+
+msgctxt "StartupError"
+msgid "FastApiClient could not load its settings safely: {}. Your files were not changed. Fix the problem and start the app again."
+msgstr "O FastApiClient não conseguiu carregar suas configurações com segurança: {}. Seus arquivos não foram alterados. Corrija o problema e inicie o app novamente."
+
+msgctxt "StartupError"
+msgid "Close"
+msgstr "Fechar"
+
 msgctxt "Tr"
 msgid "Not checked: payload contains template expressions."
 msgstr "Não verificado: o corpo contém expressões de modelo."

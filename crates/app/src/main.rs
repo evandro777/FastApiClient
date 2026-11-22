@@ -9,7 +9,7 @@ use fastapiclient_core::{
 use slint::{Model, ModelRc, SharedString, VecModel};
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     rc::Rc,
     sync::{
         Arc,
@@ -23,8 +23,10 @@ slint::include_modules!();
 #[cfg(test)]
 mod app_tests;
 mod editor;
+mod external;
 mod fixtures;
 mod highlight;
+mod history;
 mod instance;
 mod payload;
 mod sending;
@@ -43,41 +45,10 @@ struct App {
     dirty: HashSet<String>,
 }
 
-#[derive(Default)]
-struct SendState {
-    responses: VecDeque<CachedResponse>,
-    sends: HashMap<RequestKey, ActiveSend>,
-    next_send: u64,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-struct RequestKey {
-    project: String,
-    folder: Option<usize>,
-    request: usize,
-}
-
-struct CachedResponse {
-    key: RequestKey,
-    response: Arc<Response>,
-    request_log: String,
-    warning_vars: String,
-}
-
-struct ActiveSend {
-    serial: u64,
-    started: Instant,
-    phase: i32,
-    method: String,
-    host: String,
-    request_log: String,
-    warning_vars: String,
-    context: Arc<AtomicU64>,
-    cancel: http::CancelHandle,
-}
-
-const RESPONSE_CACHE_BYTES: usize = 32 * 1024 * 1024;
-const RESPONSE_CACHE_ENTRIES: usize = 256;
+use history::{
+    ActiveSend, RequestKey, SendState, cache_response, invalidate_project_context, remove_response_context,
+    take_cached_response,
+};
 
 /// Everything the callbacks share. Cloning is cheap: it only clones the handles.
 #[derive(Clone)]
@@ -116,20 +87,32 @@ fn main() {
         .select()
         .expect("cannot start the Slint software renderer");
 
-    let settings = Settings::load().unwrap_or_else(|e| {
-        eprintln!("cannot load settings safely: {e}");
-        std::process::exit(1);
-    });
+    if fixture_run && std::env::var("FASTAPICLIENT_PAGE").as_deref() == Ok("startup-error") {
+        return show_startup_error("cannot back up settings.toml: Permission denied (os error 13)");
+    }
+    let settings = match Settings::load() {
+        Ok(settings) => settings,
+        Err(e) => {
+            eprintln!("cannot load settings safely: {e}");
+            return show_startup_error(&e.to_string());
+        }
+    };
     let fixture_mode = fixtures::mode();
     if !fixture_run {
-        remove_old_responses();
+        external::remove_old_responses();
     }
-    let (ws, persist) = match fixture_mode {
+    let (ws, persist, unreadable) = match fixture_mode {
         // With fixtures nothing is read, saved or sent, so the real system is never touched.
-        Some(mode) => (fixtures::workspace(mode), false),
-        None => (load_workspace(&settings), true),
+        Some(mode) => (fixtures::workspace(mode), false, vec![]),
+        None => {
+            let (ws, unreadable) = load_workspace(&settings);
+            (ws, true, unreadable)
+        }
     };
     let ui = Main::new().unwrap();
+    // A wrongly owned folder makes every file unreadable: cap the list so the banner stays short.
+    let more = if unreadable.len() > 5 { ", …" } else { "" };
+    ui.set_load_error(format!("{}{more}", unreadable[..unreadable.len().min(5)].join(", ")).into());
     // Take the socket now that the window exists; a later start sends "show" and this window is raised.
     if !fixture_run {
         let weak = ui.as_weak();
@@ -187,6 +170,7 @@ fn main() {
     match std::env::var("FASTAPICLIENT_PAGE").as_deref() {
         Ok("about") => ui.set_about_open(true),
         Ok("menu") => ui.set_menu_open(true),
+        Ok("load-error") if fixture_run => ui.set_load_error("Payments.json, Orders.json".into()),
         Ok("save-error") if fixture_run => {
             ui.set_save_project("Payments".into());
             ui.set_save_error("Permission denied (os error 13)".into());
@@ -316,8 +300,19 @@ fn main() {
     ui.run().unwrap();
 }
 
-fn load_workspace(settings: &Settings) -> Workspace {
-    let mut ws = Workspace::new(store::load_all());
+/// A window of its own, because Main needs settings: a desktop launch has no terminal to print the reason to.
+fn show_startup_error(detail: &str) {
+    let _ = slint::select_bundled_translation(&language(&Settings::default()));
+    let Ok(window) = StartupError::new() else { return };
+    window.set_detail(detail.into());
+    let weak = window.as_weak();
+    window.on_dismiss(move || _ = weak.upgrade().map(|w| w.hide()));
+    let _ = window.run();
+}
+
+fn load_workspace(settings: &Settings) -> (Workspace, Vec<String>) {
+    let (projects, unreadable) = store::load_all();
+    let mut ws = Workspace::new(projects);
     if let Some(project) = ws.projects.iter().position(|p| p.id == settings.last_project) {
         let wanted = Sel {
             project,
@@ -333,7 +328,7 @@ fn load_workspace(settings: &Settings) -> Workspace {
             });
         }
     }
-    ws
+    (ws, unreadable)
 }
 
 fn retry_saves(ui: &Main, app: &mut App, mut write: impl FnMut(&Project) -> std::io::Result<()>) -> bool {
@@ -464,27 +459,6 @@ fn request_keys_in_scope(app: &App, sel: Sel) -> HashSet<RequestKey> {
         .collect()
 }
 
-fn remove_response_context(state: &mut SendState, keys: &HashSet<RequestKey>) {
-    state.responses.retain(|saved| !keys.contains(&saved.key));
-    for key in keys {
-        if let Some(send) = state.sends.remove(key) {
-            send.context.fetch_add(1, Ordering::SeqCst);
-            send.cancel.cancel();
-        }
-    }
-}
-
-fn invalidate_project_context(state: &mut SendState, project: &str) {
-    let keys: HashSet<_> = state
-        .responses
-        .iter()
-        .map(|saved| saved.key.clone())
-        .chain(state.sends.keys().cloned())
-        .filter(|key| key.project == project)
-        .collect();
-    remove_response_context(state, &keys);
-}
-
 fn invalidate_project_responses(c: &Ctx, project: &str) {
     invalidate_project_context(&mut c.send_state.lock().unwrap(), project);
     bump_project_cache_epoch(c, project);
@@ -502,44 +476,6 @@ fn project_cache_epoch(c: &Ctx, project: &str) -> Arc<AtomicU64> {
 
 fn bump_project_cache_epoch(c: &Ctx, project: &str) {
     project_cache_epoch(c, project).fetch_add(1, Ordering::SeqCst);
-}
-
-fn cache_response(
-    state: &mut SendState,
-    key: RequestKey,
-    response: Response,
-    request_log: String,
-    warning_vars: String,
-) {
-    state.responses.retain(|saved| saved.key != key);
-    state.responses.push_back(CachedResponse {
-        key,
-        response: Arc::new(response),
-        request_log,
-        warning_vars,
-    });
-    while state.responses.len() > RESPONSE_CACHE_ENTRIES
-        || state
-            .responses
-            .iter()
-            .map(|saved| saved.response.body.len() + saved.request_log.len() + saved.warning_vars.len())
-            .sum::<usize>()
-            > RESPONSE_CACHE_BYTES
-    {
-        state.responses.pop_front();
-    }
-}
-
-fn take_cached_response(state: &mut SendState, key: &RequestKey) -> Option<(Arc<Response>, String, String)> {
-    let index = state.responses.iter().position(|saved| &saved.key == key)?;
-    let saved = state.responses.remove(index)?;
-    let result = (
-        saved.response.clone(),
-        saved.request_log.clone(),
-        saved.warning_vars.clone(),
-    );
-    state.responses.push_back(saved);
-    Some(result)
 }
 
 /// Keep the selection and its draft intact unless the saved project has actually gone.
@@ -693,53 +629,6 @@ fn show_env_error(ui: &Main, e: EnvError) {
 }
 
 /// Prepares the environment editor: it opens on the active environment.
-/// Extension guessed from the text, so the default editor picks a syntax. Sniffing avoids carrying the Content-Type here.
-fn guess_ext(text: &str) -> &'static str {
-    let t = text.trim_start();
-    let lower: String = t.chars().take(64).collect::<String>().to_ascii_lowercase();
-    if t.starts_with(['{', '[']) {
-        "json"
-    } else if t.starts_with('<') && !lower.starts_with("<!doctype html") && !lower.starts_with("<html") {
-        "xml"
-    } else {
-        "txt"
-    }
-}
-
-/// Under the cache dir, not /tmp, which a Flatpak sandbox does not share with the host.
-fn response_dir() -> std::io::Result<std::path::PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))
-        .ok_or_else(|| std::io::Error::other("no cache directory"))?;
-    Ok(base.join("FastApiClient"))
-}
-
-/// A response can hold a token: the copy opened in an external editor does not outlive the next start.
-fn remove_old_responses() {
-    let Ok(entries) = response_dir().and_then(std::fs::read_dir) else {
-        return;
-    };
-    for path in entries.flatten().map(|e| e.path()) {
-        if path.file_stem().is_some_and(|s| s == "response") {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
-/// One fixed file there, overwritten each time.
-fn open_external(text: &str) -> std::io::Result<()> {
-    let dir = response_dir()?;
-    // A response can hold a token, so the file is private like the projects.
-    fastapiclient_core::files::create_private_dir(&dir)?;
-    let file = dir.join(format!("response.{}", guess_ext(text)));
-    fastapiclient_core::files::write_private(&file, text)?;
-    let mut child = std::process::Command::new("xdg-open").arg(file).spawn()?;
-    // Reaped on a thread, or every call would leave a zombie in this long-lived process.
-    std::thread::spawn(move || _ = child.wait());
-    Ok(())
-}
-
 fn open_envs(ui: &Main, c: &Ctx) {
     let app = c.app.borrow();
     ui.set_env_edit_index(app.ws.active_env_index().map_or(0, |i| i as i32));
@@ -1577,7 +1466,7 @@ fn wire(ui: &Main, c: &Ctx, settings: Settings) {
             .unwrap_or_default()
     });
     ui.on_open_external(|text| {
-        if let Err(e) = open_external(&text) {
+        if let Err(e) = external::open_external(&text) {
             eprintln!("cannot open the response: {e}");
         }
     });
@@ -1751,99 +1640,11 @@ fn language(settings: &Settings) -> String {
 mod tests {
     use super::*;
 
-    fn response(body: &str) -> Response {
-        Response {
-            status: 200,
-            reason: "OK".into(),
-            headers: vec![("content-type".into(), "application/json".into())],
-            body: body.as_bytes().to_vec(),
-            truncated: false,
-            elapsed: Duration::from_millis(12),
-        }
-    }
-
-    #[test]
-    fn response_history_is_per_request_and_keeps_recent_entries() {
-        let mut state = SendState::default();
-        let a = RequestKey {
-            project: "p".into(),
-            folder: None,
-            request: 0,
-        };
-        let b = RequestKey {
-            request: 1,
-            ..a.clone()
-        };
-        cache_response(&mut state, a.clone(), response("A"), "GET /a".into(), String::new());
-        cache_response(&mut state, b.clone(), response("B"), "GET /b".into(), String::new());
-        assert_eq!(take_cached_response(&mut state, &a).unwrap().0.body, b"A");
-        assert_eq!(take_cached_response(&mut state, &b).unwrap().0.body, b"B");
-
-        for request in 2..=RESPONSE_CACHE_ENTRIES {
-            cache_response(
-                &mut state,
-                RequestKey { request, ..a.clone() },
-                response("x"),
-                String::new(),
-                String::new(),
-            );
-        }
-        assert!(take_cached_response(&mut state, &a).is_none());
-        assert!(take_cached_response(&mut state, &b).is_some());
-        assert_eq!(state.responses.len(), RESPONSE_CACHE_ENTRIES);
-    }
-
-    #[test]
-    fn invalidating_one_request_drops_its_response_and_cancels_its_send() {
-        let mut state = SendState::default();
-        let a = RequestKey {
-            project: "p".into(),
-            folder: Some(0),
-            request: 0,
-        };
-        let b = RequestKey {
-            request: 1,
-            ..a.clone()
-        };
-        cache_response(&mut state, a.clone(), response("A"), String::new(), String::new());
-        cache_response(&mut state, b.clone(), response("B"), String::new(), String::new());
-        let context = Arc::new(AtomicU64::new(0));
-        state.sends.insert(
-            a.clone(),
-            ActiveSend {
-                serial: 1,
-                started: Instant::now(),
-                phase: 1,
-                method: String::new(),
-                host: String::new(),
-                request_log: String::new(),
-                warning_vars: String::new(),
-                context: context.clone(),
-                cancel: http::CancelHandle::default(),
-            },
-        );
-        let removed = HashSet::from([a.clone()]);
-        remove_response_context(&mut state, &removed);
-        assert_eq!(context.load(Ordering::SeqCst), 1);
-        assert!(take_cached_response(&mut state, &a).is_none());
-        assert!(take_cached_response(&mut state, &b).is_some());
-    }
-
     #[test]
     fn themes_and_their_indexes_agree() {
         for (i, t) in THEMES.iter().enumerate() {
             assert_eq!(theme_index(t), i as i32);
         }
         assert_eq!(theme_index("bogus"), 0);
-    }
-
-    #[test]
-    fn guesses_extension() {
-        assert_eq!(guess_ext(" {\"a\":1}"), "json");
-        assert_eq!(guess_ext("[1]"), "json");
-        // A server's HTML must not open in a browser, where its scripts would run.
-        assert_eq!(guess_ext("<!DOCTYPE html><p>"), "txt");
-        assert_eq!(guess_ext("<?xml version=\"1.0\"?>"), "xml");
-        assert_eq!(guess_ext("hello"), "txt");
     }
 }

@@ -19,6 +19,8 @@ flatpak/                  manifest, build.sh (vendors crates, builds outside the
 docs/                     landing page (`site/index.html`, deployed with the Flatpak remote), `screenshots/`, FLATPAK-SIGNING.md, FLATHUB.md
 README.md, BUILD.md       what users read / build, settings and details (keep both in step with behaviour)
 dev/gen_po.py             writes the .po files from one table
+crates/app/src/history.rs   per-request response history and in-flight Sends (`SendState`); limits come from `chain::CACHE_*`
+crates/app/src/external.rs  "Open in editor": private temp file + `xdg-open`; only `<?xml` text is saved as `.xml`
 scripts/ui-snapshot.sh    renders pages on a private Xvfb with canned data (crates/app/src/fixtures.rs, env FASTAPICLIENT_FIXTURES=empty|single|many, FASTAPICLIENT_PAGE=<n>) to target/ui-snapshots/
 ```
 
@@ -61,6 +63,7 @@ System deps: `libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-dev
 
 - Syntect's bundled JSON grammar marks keys with `meta.structure.dictionary.key.json`; match its nested `string` scope to override generic string coloring. Token roles are shared by both editors; the VS Code Dark+ / Light+ palette in `code-edit.slint` reacts to appearance changes without reparsing.
 
+- Errors the user must see never go only to stderr (a desktop launch has no terminal): unreadable project files use `store::load_all`'s second value and the `load-error` banner; settings that cannot load safely open the small `StartupError` window. Snapshot pages: `load-error`, `startup-error`. A values-free export also blanks headers whose name contains auth/cookie/token/secret/password/key (`exchange.rs`).
 - Dialogs (About) are in-window overlays (`component About` as the last child of `Main`), not second windows: closing Main always ends the app and `scripts/ui-snapshot.sh` can capture them (`FASTAPICLIENT_PAGE=about`). Its version comes from `CARGO_PKG_VERSION`, the Website button opens `CARGO_PKG_REPOSITORY` with `xdg-open`.
 
 - A file body (`Body::File`) is never imported (Insomnia or our own export, `without_file_bodies` in `exchange.rs`): a shared collection must not point Send at a local file. The Send worker confirms the resolved path and host before every upload, including dependencies, through `sending::Dialogs` (Prompt kind 8). Snapshot page: `sendfile`.
